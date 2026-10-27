@@ -12,7 +12,7 @@ local function add(s, path, line, commit)
     line = line,
     commit = commit,
     body = 'note ' .. r.next_id,
-    private = false,
+    kind = 'comment',
     created_at = '',
     updated_at = '',
   })
@@ -21,7 +21,7 @@ local function add(s, path, line, commit)
 end
 
 it('comments follow their content when a new commit lands', function()
-  local fx = h.start({ pr = true })
+  local fx = h.start({ context = true })
   local keep = add(fx.s, 'a.lua', 15, fx.c2)
   local gone = add(fx.s, 'new.lua', 1, fx.c2)
   vim.cmd('silent! %bwipeout!')
@@ -39,7 +39,7 @@ it('comments follow their content when a new commit lands', function()
 end)
 
 it('a comment on a changed line moves to the line that replaced it', function()
-  local fx = h.start({ pr = true })
+  local fx = h.start({ context = true })
   local c = add(fx.s, 'a.lua', 3, fx.c2)
   vim.cmd('silent! %bwipeout!')
 
@@ -54,7 +54,7 @@ it('a comment on a changed line moves to the line that replaced it', function()
 end)
 
 it('a multi-line comment keeps its span when lines are inserted above it', function()
-  local fx = h.start({ pr = true })
+  local fx = h.start({ context = true })
   local c = add(fx.s, 'a.lua', 15, fx.c2)
   c.start_line = 14
   vim.cmd('silent! %bwipeout!')
@@ -69,7 +69,7 @@ it('a multi-line comment keeps its span when lines are inserted above it', funct
 end)
 
 it('an older range leaves comments where they are', function()
-  local fx = h.start({ pr = true })
+  local fx = h.start({ context = true })
   local c = add(fx.s, 'a.lua', 15, fx.c2)
   vim.cmd('silent! %bwipeout!')
 

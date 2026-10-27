@@ -3,26 +3,72 @@ local git = require('revision.git')
 
 local M = {}
 
-M.VERSION = 1
+M.VERSION = 2
 
 local function session()
   return require('revision.session').s
 end
 
-function M.path(s)
-  local name
-  if s.pr then
-    name = tostring(s.pr.number)
-  elseif s.branch then
-    name = 'branch-' .. s.branch:gsub('[^%w._-]', '_')
-  else
-    name = 'head-' .. s.head:sub(1, 12)
+local function ensure_excluded(s)
+  local dir = git.common_dir(s.root) .. '/info'
+  vim.fn.mkdir(dir, 'p')
+  local file = dir .. '/exclude'
+  local text = ''
+  local f = io.open(file, 'r')
+  if f then
+    text = f:read('*a')
+    f:close()
   end
-  return vim.fn.stdpath('data') .. '/revision/' .. s.repo .. '/' .. name .. '.json'
+  for line in vim.gsplit(text, '\n', { plain = true }) do
+    if line == '/.revision' then
+      return
+    end
+  end
+  f = assert(io.open(file, 'a'))
+  if text ~= '' and text:sub(-1) ~= '\n' then
+    f:write('\n')
+  end
+  f:write('/.revision\n')
+  f:close()
 end
 
-function M.link_path(s)
-  return s.root .. '/.revision.json'
+--- The review directory. Creates <root>/.revision as a symlink into the data dir when absent.
+function M.dir(s)
+  local link = s.root .. '/.revision'
+  local st = vim.uv.fs_lstat(link)
+  local dir
+  if st and st.type == 'link' then
+    dir = vim.uv.fs_realpath(link)
+    if not dir then
+      local target = assert(vim.uv.fs_readlink(link))
+      vim.fn.mkdir(target, 'p')
+      dir = assert(vim.uv.fs_realpath(target))
+    end
+  elseif st and st.type == 'directory' then
+    dir = link
+  elseif st then
+    error(link .. ' exists and is not a directory or symlink', 0)
+  else
+    local key
+    if s.branch then
+      key = 'branch-' .. s.branch:gsub('[^%w._-]', '_')
+    else
+      key = 'head-' .. (s.head or 'none'):sub(1, 12)
+    end
+    dir = vim.fn.stdpath('data') .. '/revision/' .. s.repo .. '/' .. key
+    vim.fn.mkdir(dir, 'p')
+    assert(vim.uv.fs_symlink(dir, link))
+  end
+  ensure_excluded(s)
+  return dir
+end
+
+function M.review_path(s)
+  return s.dir .. '/review.json'
+end
+
+function M.context_path(s)
+  return s.dir .. '/context.json'
 end
 
 local function fresh()
@@ -35,6 +81,9 @@ local function fresh()
     viewed_hunks = {},
     rounds = {},
     next_id = 1,
+    dismissed_findings = {},
+    reviewed_commits = {},
+    view = { sort = 'category', unviewed = false, annotated = false, categories = vim.NIL },
   }
 end
 
@@ -103,45 +152,37 @@ local function encode(review)
     t.viewed_files = vim.empty_dict()
   end
   table.sort(t.viewed_hunks)
+  table.sort(t.dismissed_findings)
+  table.sort(t.reviewed_commits)
   return vim.json.encode(t, { indent = '  ', sort_keys = true })
 end
 
-local function ensure_link(s, path)
-  local link = M.link_path(s)
-  local st = vim.uv.fs_lstat(link)
-  if st then
-    if st.type ~= 'link' then
-      error(link .. ' exists and is not a symlink', 0)
-    end
-    if vim.uv.fs_readlink(link) == path then
-      return
-    end
-    assert(vim.uv.fs_unlink(link))
+--- Every commit of the reviewed range, oldest first.
+local function range_commits(s)
+  local r = s.range
+  if not r or r.worktree or not r.end_ then
+    return {}
   end
-  assert(vim.uv.fs_symlink(path, link))
+  local args = { 'rev-list' }
+  if r.start == git.EMPTY_TREE then
+    table.insert(args, r.end_)
+  else
+    table.insert(args, r.start .. '..' .. r.end_)
+  end
+  return util.lines(git.run(s.root, args, { allow_fail = true }) or '')
 end
 
-local function ensure_excluded(s)
-  local dir = git.common_dir(s.root) .. '/info'
-  vim.fn.mkdir(dir, 'p')
-  local file = dir .. '/exclude'
-  local text = ''
-  local f = io.open(file, 'r')
-  if f then
-    text = f:read('*a')
-    f:close()
+local function mark_reviewed(s)
+  local seen = {}
+  for _, sha in ipairs(s.review.reviewed_commits) do
+    seen[sha] = true
   end
-  for line in vim.gsplit(text, '\n', { plain = true }) do
-    if line == '/.revision.json' then
-      return
+  for _, sha in ipairs(range_commits(s)) do
+    if not seen[sha] then
+      seen[sha] = true
+      table.insert(s.review.reviewed_commits, sha)
     end
   end
-  f = assert(io.open(file, 'a'))
-  if text ~= '' and text:sub(-1) ~= '\n' then
-    f:write('\n')
-  end
-  f:write('/.revision.json\n')
-  f:close()
 end
 
 function M.save(s)
@@ -149,8 +190,6 @@ function M.save(s)
   r.version = M.VERSION
   r.body = table.concat(vim.api.nvim_buf_get_lines(s.review_buf, 0, -1, false), '\n')
   r.repo = s.repo
-  r.pr = s.pr and s.pr.number or vim.NIL
-  r.url = s.pr and s.pr.url or vim.NIL
   r.branch = s.branch or vim.NIL
   r.base_ref = s.base_ref or vim.NIL
   r.head = s.head or vim.NIL
@@ -162,8 +201,9 @@ function M.save(s)
   elseif s.head then
     table.insert(r.rounds, { head = s.head, saved_at = now })
   end
+  mark_reviewed(s)
 
-  local path = M.path(s)
+  local path = M.review_path(s)
   vim.fn.mkdir(vim.fs.dirname(path), 'p')
   local tmp = path .. '.tmp'
   local f = assert(io.open(tmp, 'w'))
@@ -171,19 +211,11 @@ function M.save(s)
   f:close()
   assert(vim.uv.fs_rename(tmp, path))
   vim.bo[s.review_buf].modified = false
-
-  ensure_link(s, path)
-  ensure_excluded(s)
   util.notify('saved ' .. path)
 end
 
 function M.unlink(s)
-  local link = M.link_path(s)
-  local st = vim.uv.fs_lstat(link)
-  if st and st.type == 'link' then
-    vim.uv.fs_unlink(link)
-  end
-  vim.uv.fs_unlink(M.path(s))
+  vim.uv.fs_unlink(M.review_path(s))
 end
 
 return M

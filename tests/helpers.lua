@@ -42,7 +42,7 @@ local function numbered(n, fmt)
   return t
 end
 
---- Only git on PATH, so gh is unavailable; data dir under a temp dir.
+--- Only git on PATH; data dir under a temp dir.
 function M.isolate()
   local tmp = vim.fn.tempname()
   local bin = tmp .. '/bin'
@@ -99,25 +99,25 @@ function M.fixture(dir)
   return { repo = repo, wt = wt, main = main, c1 = c1, c2 = c2 }
 end
 
-local gh = require('revision.gh')
-local real_pr_view = gh.pr_view
+--- Writes <wt>/.revision/context.json for the fixture, merged over the default PR-ish context.
+function M.context(fx, extra)
+  local t = vim.tbl_deep_extend('force', {
+    version = 1,
+    title = 'feat',
+    url = 'https://example.test/pr/7',
+    base = fx.main,
+    base_ref = 'main',
+    head = fx.c2,
+  }, extra or {})
+  write(fx.wt .. '/.revision/context.json', vim.json.encode(t))
+end
 
---- Fresh fixture with the session started in its worktree; opts.pr stubs gh with an open PR for feat.
+--- Fresh fixture with the session started in its worktree; opts.context writes a context file.
 function M.start(opts)
   local fx = M.fixture()
   vim.cmd.cd(vim.fn.fnameescape(fx.wt))
-  if opts and opts.pr then
-    gh.pr_view = function()
-      return {
-        number = 7,
-        url = 'https://github.com/o/r/pull/7',
-        title = 'feat',
-        baseRefName = 'main',
-        baseRefOid = fx.main,
-        headRefName = 'feat',
-        headRefOid = fx.c2,
-      }
-    end
+  if opts and opts.context then
+    M.context(fx, type(opts.context) == 'table' and opts.context or nil)
   end
   fx.s = require('revision.session').start()
   return fx
@@ -128,7 +128,6 @@ function M.reset()
   local session = require('revision.session')
   pcall(session.stop, { force = true })
   session.s = nil
-  gh.pr_view = real_pr_view
   vim.cmd('silent! %bwipeout!')
 end
 

@@ -11,7 +11,7 @@ it(':qa is refused with E37 while the review is unsaved', function()
     start_line = vim.NIL,
     commit = fx.c2,
     body = 'x',
-    private = true,
+    kind = 'note',
   })
   require('revision.store').touch()
   local ok, err = pcall(vim.cmd, 'qa')

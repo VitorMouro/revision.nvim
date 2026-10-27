@@ -17,14 +17,14 @@ it('picker rows line up every column', function()
 end)
 
 it('picker rows carry the hunk and comment counts', function()
-  local fx = h.start({ pr = true })
+  local fx = h.start({ context = true })
   local rows = files.rows(fx.s)
   local by_path = {}
   for _, r in ipairs(rows) do
     by_path[r.e.path] = r.text
   end
   assert(by_path['a.lua']:find('h:0/3', 1, true), by_path['a.lua'])
-  require('revision.comments').commit(fx.s, { path = 'a.lua', side = 'RIGHT', line = 3, private = false }, 'x')
+  require('revision.comments').commit(fx.s, { path = 'a.lua', side = 'RIGHT', line = 3, kind = 'comment' }, 'x')
   local again = files.rows(fx.s)
   local row
   for _, r in ipairs(again) do

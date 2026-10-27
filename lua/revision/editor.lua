@@ -4,7 +4,7 @@ local M = {}
 
 local function title(d)
   local span = require('revision.comments').span_text(d.start_line or d.line, d.line)
-  return (' %s:%s %s%s '):format(d.path, span, d.side, d.private and ' private' or '')
+  return (' %s:%s %s · %s%s '):format(d.path, span, d.side, d.kind, d.reply_to and ' · reply' or '')
 end
 
 local function leader()
@@ -15,7 +15,8 @@ local function leader()
   return l == ' ' and '<Space>' or l
 end
 
---- Opens the comment float for a draft { id?, path, side, start_line?, line, private, body }.
+--- Opens the comment float for a draft
+--- { id?, path, side, start_line?, line, commit?, kind, reply_to?, finding?, body }.
 function M.open(d)
   local name = 'revision://comment/' .. (d.id or 'new')
   local old = vim.fn.bufnr(name)
@@ -40,15 +41,16 @@ function M.open(d)
     border = 'rounded',
     title = title(d),
     title_pos = 'left',
-    footer = (' %srp private '):format(leader()),
+    footer = (' %srp kind '):format(leader()),
     footer_pos = 'right',
   })
 
   -- Normal mode only: an insert-mode leader chord would swallow typed spaces, and <C-p> is completion.
   vim.keymap.set('n', '<leader>rp', function()
-    d.private = not d.private
+    local s = require('revision.session').s
+    d.kind = require('revision.comments').next_kind(d.kind, s.range.worktree == true)
     vim.api.nvim_win_set_config(win, { title = title(d), title_pos = 'left' })
-  end, { buffer = buf, desc = 'revision: toggle private' })
+  end, { buffer = buf, desc = 'revision: cycle kind' })
 
   vim.api.nvim_create_autocmd('BufWriteCmd', {
     buffer = buf,
@@ -61,12 +63,11 @@ function M.open(d)
       if body:match('^%s*$') then
         error('empty comment', 0)
       end
-      local comments = require('revision.comments')
       local s = require('revision.session').s
-      if not d.private then
-        comments.check_public(s, d)
+      if s.range.worktree and d.kind == 'comment' then
+        error('comments for the remote need a commit range; cycle to note or task (<leader>rp)', 0)
       end
-      comments.commit(s, d, body)
+      require('revision.comments').commit(s, d, body)
       vim.bo[buf].modified = false
       vim.schedule(function()
         if vim.api.nvim_win_is_valid(win) then

@@ -5,6 +5,12 @@ local store = require('revision.store')
 
 local M = {}
 
+M.KINDS = { 'comment', 'note', 'task' }
+
+local SEVERITY_RANK = { blocking = 1, major = 2, minor = 3, nit = 4, info = 5 }
+local KIND_HL = { comment = 'RevisionComment', note = 'RevisionNote', task = 'RevisionTask' }
+local KIND_SIGN = { comment = 'C', note = 'N', task = 'T' }
+
 local function session()
   return require('revision.session').s
 end
@@ -20,47 +26,156 @@ function M.span_text(a, b)
   return ('L%d-L%d'):format(a, b)
 end
 
---- Comments are part of the GitHub review: errors unless reviewing a PR on a commit range.
-function M.require_enabled(s, need_commit_range)
-  if not s.pr then
-    error('comments need a GitHub PR', 0)
+--- Agent-reported status of an own task comment, or nil.
+local function task_status(c)
+  local s = session()
+  if c.kind ~= 'task' or not (s and s.task_status) then
+    return nil
   end
-  if need_commit_range and s.range.worktree then
-    error('comments need a commit range, not working changes', 0)
-  end
+  return s.task_status[c.id]
 end
 
-function M.count(s, path)
+local function severity_hl(severity)
+  return 'RevisionFinding' .. severity:sub(1, 1):upper() .. severity:sub(2)
+end
+
+function M.hl(c)
+  if c.remote then
+    return 'RevisionRemote'
+  end
+  if c.finding and not c.kind then
+    return severity_hl(c.severity)
+  end
+  if task_status(c) then
+    return 'RevisionViewed'
+  end
+  return KIND_HL[c.kind] or 'RevisionComment'
+end
+
+function M.sign(c)
+  if c.remote then
+    return 'R'
+  end
+  if c.finding and not c.kind then
+    return 'F'
+  end
+  return KIND_SIGN[c.kind] or 'C'
+end
+
+--- Findings from the context that are neither dismissed nor already answered by a comment.
+function M.findings(s)
+  if not s.ctx then
+    return {}
+  end
+  local hidden = {}
+  for _, id in ipairs(s.review.dismissed_findings) do
+    hidden[id] = true
+  end
+  for _, c in ipairs(s.review.comments) do
+    local f = util.nn(c.finding)
+    if f then
+      hidden[f] = true
+    end
+  end
+  local out = {}
+  for _, f in ipairs(s.ctx.findings) do
+    if not hidden[f.id] then
+      table.insert(out, f)
+    end
+  end
+  return out
+end
+
+--- Annotation counts of one file: own unposted comments plus remote threads, and visible findings.
+function M.counts(s, path)
   local n = 0
-  for _, c in ipairs(s.pr and s.review.comments or {}) do
-    if c.path == path then
+  for _, c in ipairs(s.review.comments) do
+    if c.path == path and not (s.posted_ids and s.posted_ids[c.id]) then
       n = n + 1
     end
   end
-  return n
-end
-
---- Comments drawn in a buffer: `right` on the buffer's own lines, `left` inside deletion blocks.
-function M.for_buffer(s, st)
-  local right, left = {}, {}
-  for _, c in ipairs(s.pr and s.review.comments or {}) do
-    if c.path == st.path then
-      if st.kind == 'deleted' then
-        if c.side == 'LEFT' and c.commit == s.range.start then
-          table.insert(right, c)
-        end
-      elseif c.side == 'RIGHT' and c.commit == s.range.end_ then
-        table.insert(right, c)
-      elseif c.side == 'LEFT' and c.commit == s.range.start then
-        table.insert(left, c)
-      end
+  for _, t in ipairs(s.ctx and s.ctx.threads or {}) do
+    if t.path == path then
+      n = n + 1
     end
   end
-  local by_id = function(x, y)
-    return x.id < y.id
+  local f = 0
+  for _, fd in ipairs(M.findings(s)) do
+    if fd.path == path then
+      f = f + 1
+    end
   end
-  table.sort(right, by_id)
-  table.sort(left, by_id)
+  return { comments = n, findings = f }
+end
+
+--- Where an item is drawn in st: 'right' on the buffer's own lines, 'left' inside deletion blocks.
+local function placement(s, st, c)
+  if c.path ~= st.path then
+    return nil
+  end
+  if c.worktree then
+    if s.range.worktree and st.kind == 'file' and c.side == 'RIGHT' then
+      return 'right'
+    end
+    return nil
+  end
+  if st.kind == 'deleted' then
+    return (c.side == 'LEFT' and c.commit == s.range.start) and 'right' or nil
+  end
+  if c.side == 'RIGHT' and c.commit == s.range.end_ then
+    return 'right'
+  end
+  if c.side == 'LEFT' and c.commit == s.range.start then
+    return 'left'
+  end
+end
+
+--- Remote threads first, then findings by severity, then own comments by id.
+local function sort_key(c)
+  if c.remote then
+    return 1, c.order, 0
+  end
+  if c.finding and not c.kind then
+    return 2, SEVERITY_RANK[c.severity] or 9, c.order
+  end
+  return 3, c.id, 0
+end
+
+local function by_key(x, y)
+  local a1, a2, a3 = sort_key(x)
+  local b1, b2, b3 = sort_key(y)
+  if a1 ~= b1 then
+    return a1 < b1
+  end
+  if a2 ~= b2 then
+    return a2 < b2
+  end
+  return a3 < b3
+end
+
+--- Annotations drawn in a buffer: own comments, remote threads and visible findings.
+function M.for_buffer(s, st)
+  local items = {}
+  for _, c in ipairs(s.review.comments) do
+    if not (s.posted_ids and s.posted_ids[c.id]) then
+      table.insert(items, c)
+    end
+  end
+  if s.ctx then
+    vim.list_extend(items, s.ctx.threads)
+    vim.list_extend(items, M.findings(s))
+  end
+  local right, left = {}, {}
+  for _, c in ipairs(items) do
+    local where = placement(s, st, c)
+    if where == 'right' then
+      table.insert(right, c)
+    elseif where == 'left' then
+      table.insert(left, c)
+    end
+  end
+  table.sort(right, by_key)
+  table.sort(left, by_key)
   return right, left
 end
 
@@ -93,20 +208,42 @@ local function wrap(line, width)
   return out
 end
 
---- Virtual lines for c; body lines wrap to width display cells (the text area of the window).
-function M.block(c, old, width)
-  local hl = c.private and 'RevisionPrivate' or 'RevisionComment'
-  local prefix = '  ┃ '
-  local head = prefix .. (c.private and 'private · ' or '') .. M.span_text(first_line(c), c.line)
-  if old then
-    head = head .. ' (old)'
+local function header(c, old)
+  local span = M.span_text(first_line(c), c.line)
+  local tail = old and ' (old)' or ''
+  if c.remote then
+    return span .. (c.resolved and ' · resolved' or '') .. tail
   end
-  local out = { { { head, hl } } }
+  if c.finding and not c.kind then
+    return ('%s · %s %s%s'):format(c.severity, c.title, span, tail)
+  end
+  local status = task_status(c)
+  if status then
+    return ('task · %s · %s %s%s'):format(status.status, util.nn(status.note) or '', span, tail)
+  end
+  return ('%s · %s%s%s'):format(c.kind, util.nn(c.reply_to) and 'reply · ' or '', span, tail)
+end
+
+--- Virtual lines for an annotation; body lines wrap to width display cells.
+function M.block(c, old, width)
+  local hl = M.hl(c)
+  local prefix = '  ┃ '
+  local out = { { { prefix .. header(c, old), hl } } }
   local room = (width or vim.o.columns) - vim.fn.strdisplaywidth(prefix)
-  for _, l in ipairs(vim.split(c.body, '\n', { plain = true })) do
-    for _, piece in ipairs(wrap(l, room)) do
-      table.insert(out, { { prefix .. piece, hl } })
+  local function body(text)
+    for _, l in ipairs(vim.split(text or '', '\n', { plain = true })) do
+      for _, piece in ipairs(wrap(l, room)) do
+        table.insert(out, { { prefix .. piece, hl } })
+      end
     end
+  end
+  if c.remote then
+    for _, rc in ipairs(c.comments or {}) do
+      table.insert(out, { { prefix .. '@' .. tostring(util.nn(rc.author) or '?'), hl } })
+      body(util.nn(rc.body))
+    end
+  else
+    body(util.nn(c.body))
   end
   return out
 end
@@ -120,8 +257,11 @@ local function left_hunk(s, c)
   end
 end
 
---- Row (1-based) where the comment shows in the current range, or nil when outdated.
+--- Row (1-based) where the comment shows in the current range, or nil when it cannot be shown.
 function M.mapped_row(s, c)
+  if c.worktree then
+    return s.range.worktree and c.line or nil
+  end
   if c.side == 'RIGHT' then
     return c.commit == s.range.end_ and c.line or nil
   end
@@ -138,8 +278,8 @@ function M.mapped_row(s, c)
   end
 end
 
-local function pr_diff(s, path)
-  if not s.pr_diff[path] then
+local function review_diff(s, path)
+  if not s.review_diff[path] then
     local e = s.file_map[path]
     local args = { 'diff', '-U3', '--histogram', '--no-color', '-M', s.merge_base, s.head, '--' }
     if e and e.old_path then
@@ -147,14 +287,17 @@ local function pr_diff(s, path)
     end
     table.insert(args, path)
     local parsed = git.parse_hunks(git.run(s.root, args))
-    s.pr_diff[path] = parsed[path] or {}
+    s.review_diff[path] = parsed[path] or {}
   end
-  return s.pr_diff[path]
+  return s.review_diff[path]
 end
 
---- Whether GitHub accepts a comment on this side and line range of the PR diff.
-local function in_diff(s, side, path, a, b)
-  for _, h in ipairs(pr_diff(s, path)) do
+--- Whether a side and line range lies inside the diff a forge would show for this review.
+local function in_review_diff(s, side, path, a, b)
+  if not s.merge_base then
+    return true
+  end
+  for _, h in ipairs(review_diff(s, path)) do
     local lo, n = h.new_start, h.new_count
     if side == 'LEFT' then
       lo, n = h.old_start, h.old_count
@@ -166,31 +309,17 @@ local function in_diff(s, side, path, a, b)
   return false
 end
 
---- Errors with the refusal message when a public comment could not be posted as drafted.
-function M.check_public(s, d)
-  if d.side == 'RIGHT' and s.range.end_ ~= s.head then
-    error('public comments need the range to end at the PR head; toggle private (<leader>rp) to keep it', 0)
-  end
-  if d.side == 'LEFT' and s.range.start ~= s.merge_base then
-    error('public old-side comments need the range to start at the merge base', 0)
-  end
-  local a, b = first_line(d), d.line
-  if not in_diff(s, d.side, d.path, a, b) then
-    error(('L%d-L%d is outside the PR diff of %s; make it private (<leader>rp) to keep it'):format(a, b, d.path), 0)
-  end
-end
-
---- Whether GitHub would still accept this comment as drafted; private comments always pass.
-function M.postable(s, c)
-  if c.private then
-    return true
+--- Whether a comment no longer matches the review diff a forge would accept it on.
+function M.outdated(s, c)
+  if c.kind ~= 'comment' then
+    return false
   end
   local anchored = (c.side == 'RIGHT' and c.commit == s.range.end_ and s.range.end_ == s.head)
     or (c.side == 'LEFT' and c.commit == s.range.start and s.range.start == s.merge_base)
   if not anchored then
-    return false
+    return true
   end
-  return in_diff(s, c.side, c.path, first_line(c), c.line)
+  return not in_review_diff(s, c.side, c.path, first_line(c), c.line)
 end
 
 --- Hunks of one path between two revisions, cached for the session.
@@ -248,40 +377,62 @@ local function place(hunks, line)
   return line + delta
 end
 
---- Moves comments from earlier rounds onto the same content in the current range.
+--- Moves one annotation onto the same content at target; true when it moved.
+local function move(s, c, target)
+  local commit = util.nn(c.commit)
+  local forward = target
+    and commit
+    and commit ~= target
+    and git.ok(s.root, { 'merge-base', '--is-ancestor', commit, target })
+    and git.ok(s.root, { 'cat-file', '-e', target .. ':' .. c.path })
+  if not forward then
+    return false
+  end
+  local hunks = align_hunks(s, commit, target, c.path)
+  local start = util.nn(c.start_line)
+  local line = place(hunks, c.line)
+  c.line = line
+  if start then
+    c.start_line = math.min(place(hunks, start), line)
+  end
+  c.commit = target
+  return true
+end
+
+--- Moves annotations from earlier rounds onto the same content in the current range.
 function M.reanchor(s)
   local r = s.range
-  if not s.pr or not r or r.worktree then
+  if not r or r.worktree then
     return
   end
   local moved = false
   for _, c in ipairs(s.review.comments) do
-    local target = c.side == 'RIGHT' and r.end_ or r.start
-    local forward = target
-      and c.commit
-      and c.commit ~= target
-      and git.ok(s.root, { 'merge-base', '--is-ancestor', c.commit, target })
-      and git.ok(s.root, { 'cat-file', '-e', target .. ':' .. c.path })
-    if forward then
-      local hunks = align_hunks(s, c.commit, target, c.path)
-      local start = util.nn(c.start_line)
-      local line = place(hunks, c.line)
-      c.line = line
-      if start then
-        c.start_line = math.min(place(hunks, start), line)
-      end
-      c.commit = target
-      moved = true
+    if not c.worktree then
+      moved = move(s, c, c.side == 'RIGHT' and r.end_ or r.start) or moved
     end
   end
   if moved then
     store.touch()
   end
+  if s.ctx then
+    for _, t in ipairs(s.ctx.threads) do
+      move(s, t, t.side == 'RIGHT' and r.end_ or r.start)
+    end
+    for _, f in ipairs(s.ctx.findings) do
+      move(s, f, f.side == 'RIGHT' and r.end_ or r.start)
+    end
+  end
 end
 
---- Refuses comments on a buffer whose text is not the range end's file.
+--- Refuses comments on a buffer whose text is not the one the anchor refers to.
 local function check_anchor(s, buf, st)
   if st.kind ~= 'file' then
+    return
+  end
+  if s.range.worktree then
+    if vim.bo[buf].modified then
+      error('save the file first; comment anchors would not match', 0)
+    end
     return
   end
   local msg = ('file differs from %s; comment anchors would not match'):format(util.short(s.range.end_))
@@ -294,9 +445,9 @@ local function check_anchor(s, buf, st)
   end
 end
 
-local function current()
+--- The session, the current buffer and its review state; errors outside a reviewed file.
+function M.current()
   local s = session()
-  M.require_enabled(s, true)
   local buf = vim.api.nvim_get_current_buf()
   local st = inline.state[buf]
   if not st or st.binary then
@@ -305,8 +456,27 @@ local function current()
   return s, buf, st
 end
 
+--- The kind a new draft starts at: working changes cannot carry comments for the remote.
+local function default_kind(s)
+  return s.range.worktree and 'task' or 'comment'
+end
+
+--- The next kind in the cycle, skipping 'comment' when it cannot be posted.
+function M.next_kind(kind, skip_comment)
+  local i = 1
+  for n, k in ipairs(M.KINDS) do
+    if k == kind then
+      i = n
+    end
+  end
+  repeat
+    i = i % #M.KINDS + 1
+  until not (skip_comment and M.KINDS[i] == 'comment')
+  return M.KINDS[i]
+end
+
 function M.create(visual)
-  local s, buf, st = current()
+  local s, buf, st = M.current()
   local a, b
   if visual then
     a, b = vim.fn.line('v'), vim.fn.line('.')
@@ -324,13 +494,13 @@ function M.create(visual)
     side = st.kind == 'deleted' and 'LEFT' or 'RIGHT',
     start_line = a ~= b and a or nil,
     line = b,
-    private = false,
+    kind = default_kind(s),
     body = '',
   })
 end
 
 function M.create_left()
-  local s, buf, st = current()
+  local s, buf, st = M.current()
   local h = inline.hunk_at(buf, vim.api.nvim_win_get_cursor(0)[1])
   if not h or h.ca == 0 then
     error('no deleted lines at cursor', 0)
@@ -355,50 +525,60 @@ function M.create_left()
       side = 'LEFT',
       start_line = i.a ~= i.b and i.a or nil,
       line = i.b,
-      private = false,
+      kind = default_kind(s),
       body = '',
     })
   end))
 end
 
---- Comments under the cursor; LEFT comments in file buffers count at their deletion anchor.
-function M.at_cursor()
-  local s, buf, st = current()
+--- Annotations under the cursor; LEFT ones in file buffers count at their deletion anchor.
+function M.at_cursor(which)
+  local s, buf, st = M.current()
   local row = vim.api.nvim_win_get_cursor(0)[1]
   local right, left = M.for_buffer(s, st)
+  local function wanted(c)
+    if which == 'remote' then
+      return c.remote
+    end
+    if which == 'finding' then
+      return c.finding and not c.kind
+    end
+    return not c.remote and c.kind ~= nil
+  end
   local out = {}
   for _, c in ipairs(right) do
-    if row >= first_line(c) and row <= c.line then
+    if wanted(c) and row >= first_line(c) and row <= c.line then
       table.insert(out, c)
     end
   end
   for _, c in ipairs(left) do
     local h = inline.hunk_at(buf, row)
-    if h and h.ca > 0 and c.line >= h.sa and c.line <= h.sa + h.ca - 1 then
+    if wanted(c) and h and h.ca > 0 and c.line >= h.sa and c.line <= h.sa + h.ca - 1 then
       table.insert(out, c)
     end
   end
   return out
 end
 
-local function choose(cb)
-  local list = M.at_cursor()
+local function pick(which, empty, prompt, format, cb)
+  local list = M.at_cursor(which)
   if #list == 0 then
-    util.notify('no comment at cursor')
+    util.notify(empty)
   elseif #list == 1 then
     cb(list[1])
   else
-    vim.ui.select(list, {
-      prompt = 'Comment',
-      format_item = function(c)
-        return ('%s %s: %s'):format(c.side, M.span_text(first_line(c), c.line), vim.split(c.body, '\n')[1])
-      end,
-    }, util.guard(function(c)
-      if c then
-        cb(c)
+    vim.ui.select(list, { prompt = prompt, format_item = format }, util.guard(function(x)
+      if x then
+        cb(x)
       end
     end))
   end
+end
+
+local function choose(cb)
+  pick('own', 'no comment at cursor', 'Comment', function(c)
+    return ('%s %s: %s'):format(c.side, M.span_text(first_line(c), c.line), vim.split(c.body, '\n')[1])
+  end, cb)
 end
 
 --- Stores a draft from the editor: a new comment, or an update to draft.id.
@@ -408,19 +588,23 @@ function M.commit(s, d, body)
   if d.id then
     for _, c in ipairs(r.comments) do
       if c.id == d.id then
-        c.body, c.private, c.updated_at = body, d.private, now
+        c.body, c.kind, c.updated_at = body, d.kind, now
       end
     end
   else
+    local worktree = s.range.worktree or false
     table.insert(r.comments, {
       id = r.next_id,
       path = d.path,
       side = d.side,
       start_line = d.start_line or vim.NIL,
       line = d.line,
-      commit = d.side == 'RIGHT' and s.range.end_ or s.range.start,
+      commit = worktree and vim.NIL or (d.commit or (d.side == 'RIGHT' and s.range.end_ or s.range.start)),
+      worktree = worktree,
       body = body,
-      private = d.private,
+      kind = d.kind,
+      reply_to = d.reply_to or vim.NIL,
+      finding = d.finding or vim.NIL,
       created_at = now,
       updated_at = now,
     })
@@ -438,7 +622,9 @@ function M.edit()
       side = c.side,
       start_line = util.nn(c.start_line),
       line = c.line,
-      private = c.private,
+      commit = util.nn(c.commit),
+      kind = c.kind,
+      reply_to = util.nn(c.reply_to),
       body = c.body,
     })
   end)
@@ -461,29 +647,97 @@ function M.delete()
   end)
 end
 
-function M.toggle_private()
+function M.cycle_kind()
   choose(function(c)
-    local s = session()
-    if c.private then
-      M.check_public(s, { path = c.path, side = c.side, start_line = util.nn(c.start_line), line = c.line })
-    end
-    c.private = not c.private
+    c.kind = M.next_kind(c.kind, c.worktree == true)
     c.updated_at = util.now()
     store.touch()
     inline.rerender()
   end)
 end
 
+function M.reply()
+  local s, buf, st = M.current()
+  check_anchor(s, buf, st)
+  pick('remote', 'no remote thread at cursor', 'Thread', function(t)
+    local rc = (t.comments or {})[1] or {}
+    return ('%s @%s: %s'):format(
+      M.span_text(first_line(t), t.line),
+      tostring(util.nn(rc.author) or '?'),
+      vim.split(util.nn(rc.body) or '', '\n')[1]
+    )
+  end, function(t)
+    require('revision.editor').open({
+      path = t.path,
+      side = t.side,
+      start_line = util.nn(t.start_line),
+      line = t.line,
+      commit = util.nn(t.commit),
+      reply_to = t.id,
+      kind = 'comment',
+      body = '',
+    })
+  end)
+end
+
+local function format_finding(f)
+  return ('%s %s · %s'):format(M.span_text(first_line(f), f.line), f.severity, f.title)
+end
+
+function M.accept_finding()
+  local s, buf, st = M.current()
+  check_anchor(s, buf, st)
+  pick('finding', 'no finding at cursor', 'Finding', format_finding, function(f)
+    local body = util.nn(f.body) or ''
+    require('revision.editor').open({
+      path = f.path,
+      side = f.side,
+      start_line = util.nn(f.start_line),
+      line = f.line,
+      commit = util.nn(f.commit),
+      finding = f.id,
+      kind = s.range.worktree and 'task' or 'comment',
+      body = f.title .. (body ~= '' and ('\n\n' .. body) or ''),
+    })
+  end)
+end
+
+function M.dismiss_finding()
+  local s = session()
+  pick('finding', 'no finding at cursor', 'Finding', format_finding, function(f)
+    for _, id in ipairs(s.review.dismissed_findings) do
+      if id == f.id then
+        return
+      end
+    end
+    table.insert(s.review.dismissed_findings, f.id)
+    store.touch()
+    inline.rerender()
+  end)
+end
+
+local function qf_item(s, c, row, text)
+  local item = { lnum = row or c.line, text = text }
+  local e = s.file_map[c.path]
+  if e and e.status == 'D' then
+    item.bufnr = require('revision.deleted').ensure(e)
+  else
+    item.filename = s.root .. '/' .. c.path
+  end
+  return item
+end
+
+local function by_location(x, y)
+  if x.path ~= y.path then
+    return x.path < y.path
+  end
+  return x.line < y.line
+end
+
 function M.quickfix()
   local s = session()
-  M.require_enabled(s, false)
   local list = vim.deepcopy(s.review.comments)
-  table.sort(list, function(x, y)
-    if x.path ~= y.path then
-      return x.path < y.path
-    end
-    return x.line < y.line
-  end)
+  table.sort(list, by_location)
   local items = {}
   for _, c in ipairs(list) do
     local row = M.mapped_row(s, c)
@@ -491,28 +745,32 @@ function M.quickfix()
     if c.side == 'LEFT' then
       tags = tags .. '[LEFT] '
     end
-    if c.private then
-      tags = tags .. '[private] '
+    if c.kind ~= 'comment' then
+      tags = tags .. '[' .. c.kind .. '] '
     end
-    if not M.postable(s, c) then
+    local status = task_status(c)
+    if status then
+      tags = tags .. '[' .. status.status .. '] '
+    end
+    if s.posted_ids and s.posted_ids[c.id] then
+      tags = tags .. '[posted] '
+    end
+    if M.outdated(s, c) then
       tags = tags .. '[outdated] '
     end
     if not row then
       tags = tags .. '[hidden] '
     end
-    local item = {
-      lnum = row or c.line,
-      text = tags .. (vim.split(c.body, '\n', { plain = true })[1] or ''),
-    }
-    local e = s.file_map[c.path]
-    if e and e.status == 'D' then
-      item.bufnr = require('revision.deleted').ensure(e)
-    else
-      item.filename = s.root .. '/' .. c.path
-    end
-    table.insert(items, item)
+    table.insert(items, qf_item(s, c, row, tags .. (vim.split(c.body, '\n', { plain = true })[1] or '')))
   end
-  vim.fn.setqflist({}, ' ', { title = 'Revision comments', items = items })
+  local findings = M.findings(s)
+  table.sort(findings, by_location)
+  for _, f in ipairs(findings) do
+    local row = M.mapped_row(s, f)
+    local tags = row and '' or '[hidden] '
+    table.insert(items, qf_item(s, f, row, ('%s[finding:%s] %s'):format(tags, f.severity, f.title)))
+  end
+  vim.fn.setqflist({}, ' ', { title = 'Revision annotations', items = items })
   vim.cmd('copen')
 end
 

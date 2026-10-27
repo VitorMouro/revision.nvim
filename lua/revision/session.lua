@@ -1,20 +1,12 @@
 local util = require('revision.util')
 local git = require('revision.git')
-local gh = require('revision.gh')
 local store = require('revision.store')
+local context = require('revision.context')
 
 local M = {}
 
 --- The active session, or nil.
 M.s = nil
-
-local gh_noted = false
-
-local function require_pr(s)
-  if not s.pr then
-    error('no GitHub PR for this branch', 0)
-  end
-end
 
 local function repo_slug(root, remote)
   local url = git.out(root, { 'remote', 'get-url', remote }, { allow_fail = true })
@@ -27,15 +19,20 @@ local function repo_slug(root, remote)
   return '_/' .. vim.fs.basename(vim.fs.dirname(git.common_dir(root)))
 end
 
-local function resolve_base(root, cfg, pr)
-  if pr then
-    local oid = pr.baseRefOid
+local function resolve_base(root, cfg, ctx)
+  if ctx then
+    local oid = util.nn(ctx.base)
+    local name = util.nn(ctx.base_ref)
     if oid and git.ok(root, { 'cat-file', '-e', oid .. '^{commit}' }) then
-      return oid, pr.baseRefName
+      return oid, name or util.short(oid)
     end
-    local ref = cfg.remote .. '/' .. pr.baseRefName
-    util.warn(('base %s not fetched locally; using %s (run git fetch)'):format(util.short(oid), ref))
-    return ref, pr.baseRefName
+    if name then
+      local ref = cfg.remote .. '/' .. name
+      if oid then
+        util.warn(('base %s not fetched locally; using %s (run git fetch)'):format(util.short(oid), ref))
+      end
+      return ref, name
+    end
   end
   local ref = cfg.base
   if not ref then
@@ -69,6 +66,12 @@ local function setup_autocmds(s)
       if inline.state[a.buf] then
         inline.setup_win(vim.api.nvim_get_current_win(), a.buf)
       end
+    end,
+  })
+  vim.api.nvim_create_autocmd('BufEnter', {
+    group = group,
+    callback = function()
+      require('revision.panel').refresh()
     end,
   })
   vim.api.nvim_create_autocmd('BufWritePost', {
@@ -110,44 +113,40 @@ function M.start()
   require('revision').define_highlights()
   local cfg = require('revision.config').opts
   local root = git.toplevel(vim.fn.getcwd())
-
-  local pr, why = gh.pr_view(root)
-  if not pr and not gh_noted then
-    gh_noted = true
-    util.notify(('no GitHub PR (%s); reviewing locally'):format(why))
-  end
-
-  local base, base_ref = resolve_base(root, cfg, pr)
   local head = git.try_head(root)
-  local merge_base = base and head and git.out(root, { 'merge-base', 'HEAD', base }, { allow_fail = true })
-  local branch = git.current_branch(root)
-  if pr and pr.headRefOid ~= head then
-    util.warn(('worktree HEAD %s is not the PR head %s'):format(util.short(head), util.short(pr.headRefOid)))
-  end
-  local upstream = not pr
-    and git.out(root, { 'rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}' }, { allow_fail = true })
 
   local s = {
     root = root,
     repo = repo_slug(root, cfg.remote),
-    pr = pr,
-    branch = branch,
-    base = base,
-    base_ref = base_ref,
-    merge_base = merge_base ~= '' and merge_base or nil,
-    upstream = upstream ~= '' and upstream or nil,
+    branch = git.current_branch(root),
     head = head,
     show_comments = true,
     saved_wo = {},
-    pr_diff = {},
+    review_diff = {},
+    panel_collapsed = { Generated = true, Mechanical = true },
   }
+  s.dir = store.dir(s)
+  s.ctx = context.load(store.context_path(s))
+  s.base, s.base_ref = resolve_base(root, cfg, s.ctx)
+  local merge_base = s.base and head and git.out(root, { 'merge-base', 'HEAD', s.base }, { allow_fail = true })
+  s.merge_base = (merge_base and merge_base ~= '') and merge_base or nil
+  if not s.ctx then
+    local upstream =
+      git.out(root, { 'rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}' }, { allow_fail = true })
+    s.upstream = (upstream and upstream ~= '') and upstream or nil
+  end
+  if s.ctx and util.nn(s.ctx.head) and s.ctx.head ~= head then
+    util.warn(('worktree HEAD %s is not the context head %s'):format(util.short(head), util.short(s.ctx.head)))
+  end
+
   require('revision.range').refresh_local(s)
-  s.review = store.load(store.path(s))
+  s.review = store.load(store.review_path(s))
 
   M.s = s
   local ok, e = pcall(function()
     store.create_buf(s)
     setup_autocmds(s)
+    context.apply(s)
     require('revision.range').default()
   end)
   if not ok then
@@ -167,9 +166,38 @@ function M.range()
   require('revision.range').pick()
 end
 
+function M.view()
+  M.start()
+  require('revision.view').menu()
+end
+
+function M.panel()
+  M.start()
+  require('revision.panel').toggle()
+end
+
+function M.commits()
+  M.start()
+  require('revision.commits').toggle()
+end
+
+function M.tasks()
+  M.start()
+  require('revision.agent').tasks()
+end
+
 function M.save()
   local s = M.start()
   store.save(s)
+end
+
+--- Re-reads context.json; the base, head and range are left alone.
+function M.reload()
+  local s = M.start()
+  s.ctx = context.load(store.context_path(s))
+  context.apply(s)
+  require('revision.panel').refresh()
+  util.notify('context reloaded')
 end
 
 function M.discard()
@@ -180,7 +208,7 @@ function M.discard()
   if vim.fn.confirm('Discard unsaved review changes?', '&Yes\n&No', 2) ~= 1 then
     return
   end
-  s.review = store.load(store.path(s))
+  s.review = store.load(store.review_path(s))
   require('revision.viewed').reconcile(s)
   store.set_body_lines(s)
   require('revision.inline').rerender()
@@ -188,7 +216,7 @@ end
 
 function M.delete()
   local s = M.start()
-  local path = store.path(s)
+  local path = store.review_path(s)
   if vim.fn.confirm('Delete review file ' .. path .. '?', '&Yes\n&No', 2) ~= 1 then
     return
   end
@@ -219,6 +247,8 @@ function M.stop(opts)
     end
     vim.cmd('silent! checktime')
   end
+  require('revision.panel').close()
+  require('revision.commits').close()
   for _, buf in ipairs(vim.api.nvim_list_bufs()) do
     if vim.api.nvim_buf_get_name(buf):find('^revision://') then
       vim.api.nvim_buf_delete(buf, { force = true })
@@ -229,7 +259,6 @@ end
 
 function M.toggle_comments()
   local s = M.start()
-  require_pr(s)
   s.show_comments = not s.show_comments
   require('revision.inline').rerender()
 end
@@ -241,7 +270,6 @@ end
 
 function M.body()
   local s = M.start()
-  require_pr(s)
   local w = math.floor(vim.o.columns * 0.8)
   local h = math.floor(vim.o.lines * 0.8)
   local verdict = util.nn(s.review.verdict) or 'no verdict'
@@ -259,7 +287,6 @@ end
 
 function M.verdict()
   local s = M.start()
-  require_pr(s)
   vim.ui.select({ 'approve', 'request_changes', 'comment', 'none' }, { prompt = 'Verdict' }, function(v)
     if not v then
       return
@@ -271,21 +298,44 @@ end
 
 function M.info()
   local s = M.start()
-  require_pr(s)
-  local pr, why = gh.pr_view(s.root)
-  if not pr then
-    error('gh: ' .. tostring(why), 0)
+  local ctx = s.ctx
+  if not ctx then
+    error('no context file; the review tool writes ' .. store.context_path(s), 0)
   end
-  s.pr = pr
-  vim.lsp.util.open_floating_preview({
-    ('#%d %s'):format(pr.number, pr.title),
-    pr.url,
-    ('base %s (%s) ← head %s (%s)'):format(pr.baseRefName, util.short(s.merge_base), pr.headRefName, util.short(s.head)),
-    ('state %s%s'):format(pr.state, pr.isDraft and ', draft' or ''),
-    ('mergeable %s / %s'):format(pr.mergeable, pr.mergeStateStatus),
-    ('review decision %s'):format(util.nn(pr.reviewDecision) ~= '' and pr.reviewDecision or 'none'),
-    'range ' .. require('revision.range').describe(s.range),
-  }, 'text', { border = 'rounded' })
+  local lines = { util.nn(ctx.title) or s.branch or util.short(s.head) }
+  if util.nn(ctx.url) then
+    table.insert(lines, ctx.url)
+  end
+  table.insert(
+    lines,
+    ('base %s (%s) ← head %s (%s)'):format(
+      s.base_ref or '-',
+      util.short(s.merge_base),
+      s.branch or util.short(s.head),
+      util.short(s.head)
+    )
+  )
+  for _, m in ipairs(ctx.meta) do
+    table.insert(lines, ('%s: %s'):format(tostring(util.nn(m.label)), tostring(util.nn(m.value))))
+  end
+  table.insert(lines, 'range ' .. require('revision.range').describe(s.range))
+  local desc = util.nn(ctx.description)
+  if desc and desc ~= '' then
+    table.insert(lines, '')
+    vim.list_extend(lines, vim.split(desc, '\n', { plain = true }))
+  end
+  for _, r in ipairs(ctx.reviews) do
+    table.insert(lines, '')
+    table.insert(
+      lines,
+      ('%s %s %s'):format(tostring(util.nn(r.author)), tostring(util.nn(r.state)), tostring(util.nn(r.submitted_at)))
+    )
+    local body = util.nn(r.body)
+    if body and body ~= '' then
+      vim.list_extend(lines, vim.split(body, '\n', { plain = true }))
+    end
+  end
+  vim.lsp.util.open_floating_preview(lines, 'markdown', { border = 'rounded' })
 end
 
 return M

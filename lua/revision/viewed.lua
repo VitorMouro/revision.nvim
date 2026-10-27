@@ -83,18 +83,26 @@ function M.reconcile(s)
   end
 end
 
+--- Marks one file viewed or unviewed, keeping its hunks and any open buffer in step.
+function M.set_file(s, path, on)
+  s.review.viewed_files[path] = on and marker(s, path) or nil
+  set_hunks(s, path, on)
+  store.touch()
+  for buf, st in pairs(inline.state) do
+    if st.path == path and vim.api.nvim_buf_is_valid(buf) then
+      inline.render(buf)
+    end
+  end
+  require('revision.panel').refresh()
+end
+
 function M.toggle_file()
   local s = session()
-  local buf = vim.api.nvim_get_current_buf()
-  local st = inline.state[buf]
+  local st = inline.state[vim.api.nvim_get_current_buf()]
   if not st then
     return
   end
-  local on = not M.file_viewed(s, st.path)
-  s.review.viewed_files[st.path] = on and marker(s, st.path) or nil
-  set_hunks(s, st.path, on)
-  store.touch()
-  inline.render(buf)
+  M.set_file(s, st.path, not M.file_viewed(s, st.path))
 end
 
 function M.toggle_hunk()
@@ -123,6 +131,7 @@ function M.toggle_hunk()
     sync_file(s, st.path)
   end
   store.touch()
+  require('revision.panel').refresh()
   inline.render(buf)
   inline.jump(1)
 end

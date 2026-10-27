@@ -7,7 +7,15 @@ local highlights = {
   RevisionText = 'DiffText',
   RevisionTextAdd = 'DiffTextAdd',
   RevisionComment = 'DiagnosticInfo',
-  RevisionPrivate = 'DiagnosticHint',
+  RevisionNote = 'DiagnosticHint',
+  RevisionTask = 'DiagnosticWarn',
+  RevisionRemote = 'Special',
+  RevisionFindingBlocking = 'DiagnosticError',
+  RevisionFindingMajor = 'DiagnosticWarn',
+  RevisionFindingMinor = 'DiagnosticInfo',
+  RevisionFindingNit = 'DiagnosticHint',
+  RevisionFindingInfo = 'DiagnosticHint',
+  RevisionCurrent = 'Visual',
   RevisionViewed = 'Comment',
 }
 
@@ -20,6 +28,7 @@ end
 function M.setup(opts)
   local config = require('revision.config')
   config.opts = vim.tbl_deep_extend('force', vim.deepcopy(config.defaults), opts or {})
+  require('revision.view').compile(config.opts.categories)
   M.define_highlights()
   vim.api.nvim_create_autocmd('ColorScheme', {
     group = vim.api.nvim_create_augroup('revision_hl', {}),

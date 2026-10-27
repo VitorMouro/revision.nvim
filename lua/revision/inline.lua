@@ -302,7 +302,7 @@ function M.render(buf)
     })
   end
 
-  local left_by_line = {}
+  local left_by_line, note_rows = {}, {}
   for _, c in ipairs(left) do
     left_by_line[c.line] = left_by_line[c.line] or {}
     table.insert(left_by_line[c.line], c)
@@ -353,8 +353,9 @@ function M.render(buf)
         local vl = {}
         for i, text in ipairs(h.old_lines) do
           table.insert(vl, deleted_virt_line(text, spans_old[i], ts))
-          if s.show_comments then
-            for _, c in ipairs(left_by_line[h.sa + i - 1] or {}) do
+          for _, c in ipairs(left_by_line[h.sa + i - 1] or {}) do
+            note_rows[h.anchor + 1] = true
+            if s.show_comments then
               vim.list_extend(vl, comments.block(c, true, width))
             end
           end
@@ -381,14 +382,15 @@ function M.render(buf)
   for _, c in ipairs(right) do
     local first = util.nn(c.start_line) or c.line
     if c.line <= nlines then
-      local hl = c.private and 'RevisionPrivate' or 'RevisionComment'
+      local hl = comments.hl(c)
       for l = first, c.line do
         vim.api.nvim_buf_set_extmark(buf, M.ns_comments, l - 1, 0, {
-          sign_text = c.private and 'P' or 'C',
+          sign_text = comments.sign(c),
           sign_hl_group = hl,
           priority = 10,
         })
       end
+      note_rows[first] = true
       if s.show_comments then
         if not blocks[c.line] then
           blocks[c.line] = {}
@@ -402,6 +404,8 @@ function M.render(buf)
   for _, line in ipairs(rows) do
     vim.api.nvim_buf_set_extmark(buf, M.ns_comments, line - 1, 0, { virt_lines = blocks[line] })
   end
+  st.note_rows = vim.tbl_keys(note_rows)
+  table.sort(st.note_rows)
 
   st.near = near
   M.update_winbar(buf)
@@ -584,6 +588,7 @@ function M.refresh_all()
       end
     end
   end
+  require('revision.panel').refresh()
 end
 
 --- Re-renders attached buffers without re-attaching (comment/viewed changes).
@@ -593,6 +598,7 @@ function M.rerender()
       M.render(buf)
     end
   end
+  require('revision.panel').refresh()
 end
 
 --- Hunk under the cursor row (1-based): new-side span or deletion anchor row.
@@ -634,6 +640,30 @@ function M.jump(dir)
     vim.api.nvim_win_set_cursor(0, { target + 1, 0 })
     vim.cmd('normal! zv')
   end
+end
+
+--- Moves to the next or previous annotation row; stops at the ends.
+function M.jump_note(dir)
+  local st = M.state[vim.api.nvim_get_current_buf()]
+  if not st or not st.note_rows then
+    return
+  end
+  local row = vim.api.nvim_win_get_cursor(0)[1]
+  local target
+  for _, r in ipairs(st.note_rows) do
+    if dir > 0 and r > row and (not target or r < target) then
+      target = r
+    elseif dir < 0 and r < row and (not target or r > target) then
+      target = r
+    end
+  end
+  if not target then
+    util.notify(dir > 0 and 'last annotation' or 'first annotation')
+    return
+  end
+  vim.cmd("normal! m'")
+  vim.api.nvim_win_set_cursor(0, { target, 0 })
+  vim.cmd('normal! zv')
 end
 
 function M.toggle_editable()

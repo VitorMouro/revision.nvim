@@ -111,9 +111,9 @@ function M.at(s, end_)
   return true
 end
 
---- Without a PR the session follows the branch: new local commits move head and the bases.
+--- Without a context file the session follows the branch: new local commits move head and the bases.
 function M.refresh_local(s)
-  if s.pr then
+  if s.ctx then
     return
   end
   if s.branch then
@@ -142,7 +142,8 @@ local function set(s, files, hunks, blobs, range)
   s.hunks = hunks
   s.blobs = blobs
   s.range = range
-  s.pr_diff = {}
+  s.review_diff = {}
+  s.category_cache = nil
   require('revision.comments').reanchor(s)
   require('revision.viewed').reconcile(s)
   require('revision.inline').refresh_all()
@@ -255,7 +256,7 @@ function M.describe(r)
   return ('%s %s..%s'):format(r.label, short(r.start), stop)
 end
 
---- The newest saved round head that is a strict ancestor of the PR head, or nil.
+--- The newest saved round head that is a strict ancestor of the session head, or nil.
 function M.last_reviewed(s)
   if not s.head then
     return nil
@@ -273,7 +274,7 @@ function M.last_reviewed(s)
   end
   if older and not s.warned_force_push then
     s.warned_force_push = true
-    util.warn("last reviewed head is not in this PR's history (force-push?)")
+    util.warn("last reviewed head is not in this branch's history (force-push?)")
   end
 end
 
@@ -294,7 +295,32 @@ function M.commits(s)
   return list
 end
 
---- Picker items: { text, kind = 'working'|'all'|'unpushed'|'since'|'commit', ... }.
+--- First parent of sha, or the empty tree for a root commit.
+function M.parent(s, sha)
+  local p = git.out(s.root, { 'rev-parse', '--verify', '-q', sha .. '^1' }, { allow_fail = true })
+  return (p and p ~= '') and p or git.EMPTY_TREE
+end
+
+--- Parent of the oldest unreviewed commit, when the range holds both reviewed and unreviewed ones.
+local function unreviewed_start(s)
+  local reviewed = {}
+  for _, sha in ipairs(s.review.reviewed_commits or {}) do
+    reviewed[sha] = true
+  end
+  local first, any = nil, false
+  for _, c in ipairs(M.commits(s)) do
+    if reviewed[c.sha] then
+      any = true
+    elseif not first then
+      first = c.sha
+    end
+  end
+  if first and any then
+    return M.parent(s, first)
+  end
+end
+
+--- Picker items: { text, kind = 'working'|'all'|'unpushed'|'since'|'unreviewed'|'commit', ... }.
 function M.items(s)
   M.refresh_local(s)
   local head7 = util.short(s.head)
@@ -325,6 +351,14 @@ function M.items(s)
       text = ('Since last review  %s..%s'):format(util.short(last), head7),
     })
   end
+  local unreviewed = unreviewed_start(s)
+  if unreviewed then
+    table.insert(items, {
+      kind = 'unreviewed',
+      start = unreviewed,
+      text = ('Unreviewed commits  %s..%s'):format(short(unreviewed), head7),
+    })
+  end
   local commits = M.commits(s)
   for i, c in ipairs(commits) do
     table.insert(items, {
@@ -345,7 +379,7 @@ local function pick_end(s, item)
     table.insert(choices, { text = ('%s %s'):format(util.short(c.sha), c.subject), sha = c.sha })
   end
   if #choices > 1 then
-    choices[#choices].text = choices[#choices].text .. (s.pr and ' (PR head)' or ' (head)')
+    choices[#choices].text = choices[#choices].text .. ' (head)'
   end
   vim.ui.select(choices, {
     prompt = 'Range end',
@@ -356,9 +390,7 @@ local function pick_end(s, item)
     if not c then
       return
     end
-    local first = commits[item.index].sha
-    local parent = git.out(s.root, { 'rev-parse', '--verify', '-q', first .. '^1' }, { allow_fail = true })
-    M.apply((parent and parent ~= '') and parent or git.EMPTY_TREE, c.sha, 'custom')
+    M.apply(M.parent(s, commits[item.index].sha), c.sha, 'custom')
   end))
 end
 
@@ -381,17 +413,19 @@ function M.pick()
       M.apply(s.upstream_base, s.head, 'unpushed')
     elseif item.kind == 'since' then
       M.apply(item.last, s.head, 'since last review')
+    elseif item.kind == 'unreviewed' then
+      M.apply(item.start, s.head, 'unreviewed')
     else
       pick_end(s, item)
     end
   end))
 end
 
---- Initial range: PR changes for a PR, else working changes, unpushed commits or branch changes.
+--- Initial range: all context changes, else working changes, unpushed commits or branch changes.
 function M.default()
   local s = session()
   local tracked_dirty = git.out(s.root, { 'status', '--porcelain', '--untracked-files=no' }) ~= ''
-  if s.pr then
+  if s.ctx then
     if tracked_dirty then
       util.notify('worktree has local changes; reviewing working changes')
       return M.working()

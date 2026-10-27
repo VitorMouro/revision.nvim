@@ -3,7 +3,10 @@ if vim.g.loaded_revision then
 end
 vim.g.loaded_revision = true
 
-local subs = { 'start', 'files', 'range', 'save', 'discard', 'delete', 'stop', 'body', 'verdict', 'comments', 'info' }
+local subs = {
+  'start', 'files', 'range', 'save', 'discard', 'delete', 'stop', 'body', 'verdict', 'comments', 'info', 'reload',
+  'view', 'panel', 'commits', 'tasks',
+}
 
 vim.api.nvim_create_user_command('Revision', function(a)
   local sub = a.fargs[1] or 'start'
