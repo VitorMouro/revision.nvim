@@ -78,6 +78,10 @@ end
 local function word_spans(a, b)
   local ta, oa = tokenize(a)
   local tb, ob = tokenize(b)
+  -- An empty side still diffs as one blank line, which would index past its tokens.
+  if #ta == 0 or #tb == 0 then
+    return #a > 0 and { { 0, #a } } or {}, #b > 0 and { { 0, #b } } or {}
+  end
   local d = vim.text.diff(table.concat(ta, '\n') .. '\n', table.concat(tb, '\n') .. '\n', { result_type = 'indices' })
   local sa, sb = {}, {}
   for _, h in ipairs(d) do

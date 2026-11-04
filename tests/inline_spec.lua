@@ -70,6 +70,12 @@ it('word diff pairs a new line with its most similar deleted line', function()
   assert(vim.deep_equal(changed, { [3] = '9' }), vim.inspect(changed))
 end)
 
+it('word diff pairing skips blank old lines', function()
+  local pairs_ = inline.pair_lines({ '', 'local foo = 1' }, { 'local foo = 2' })
+  assert(vim.deep_equal(pairs_, { 2 }), vim.inspect(pairs_))
+  assert(vim.deep_equal(inline.pair_lines({ 'x' }, { '', 'y' }), {}))
+end)
+
 it('buffer hunk hashes equal git diff -U0 hashes', function()
   local fx = h.start()
   vim.cmd.edit(fx.wt .. '/a.lua')
