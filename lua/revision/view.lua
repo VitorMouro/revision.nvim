@@ -104,40 +104,16 @@ function M.category(s, path)
   return found
 end
 
-local function annotations(s, path)
-  local c = require('revision.comments').counts(s, path)
-  return c.comments + c.findings
-end
-
---- Paths listed in the context order, mapped to their position.
-local function order_index(s)
-  local idx = {}
-  for i, e in ipairs(s.ctx and s.ctx.order or {}) do
-    if type(e.path) == 'string' then
-      idx[e.path] = i
-    end
-  end
-  return idx
-end
-
-function M.reason(s, path)
-  for _, e in ipairs(s.ctx and s.ctx.order or {}) do
-    if e.path == path then
-      return util.nn(e.reason)
-    end
-  end
-end
-
-M.SORTS = { 'path', 'size', 'activity', 'order' }
+M.SORTS = { 'path', 'size' }
 
 --- Path text filter; session-only, like yazi's.
 M.query = nil
 
---- View used when no review session is active.
-local loose = { sort = 'path', reverse = false, unviewed = false, annotated = false, categories = vim.NIL }
+--- View used when no session is active.
+local loose = { sort = 'path', reverse = false, unviewed = false }
 
 function M.state(s)
-  return s and s.review.view or loose
+  return s and s.view or loose
 end
 
 local function dir_node(name, path)
@@ -148,8 +124,6 @@ local function dir_node(name, path)
     children = {},
     map = {},
     size = 0,
-    activity = 0,
-    order = math.huge,
     changed = 0,
     additions = 0,
     deletions = 0,
@@ -162,12 +136,6 @@ local KEYS = {
   end,
   size = function(n)
     return -n.size
-  end,
-  activity = function(n)
-    return -n.activity
-  end,
-  order = function(n)
-    return n.order
   end,
 }
 
@@ -207,10 +175,8 @@ local function finish(node, cmp)
 end
 
 --- Tree of { path, e? } entries, where e marks a changed file. Directories carry
---- the sum of their files' size, activity and changes, and the lowest agent order.
---- s is nil outside a review.
+--- the sum of their files' size and changes. s is nil outside a session.
 function M.tree(s, entries)
-  local idx = s and order_index(s) or {}
   local root = dir_node('', '')
   for _, it in ipairs(entries) do
     local e, path = it.e, it.path
@@ -218,14 +184,10 @@ function M.tree(s, entries)
       path = path,
       e = e,
       size = e and (e.additions + e.deletions) or 0,
-      activity = e and annotations(s, e.path) or 0,
-      order = idx[path] or math.huge,
     }
     local node, start = root, 1
     while true do
       node.size = node.size + leaf.size
-      node.activity = node.activity + leaf.activity
-      node.order = math.min(node.order, leaf.order)
       if e then
         node.changed = node.changed + 1
         node.additions = node.additions + e.additions
@@ -282,10 +244,10 @@ function M.match_query(path)
   return path:lower():find(q:lower(), 1, true) ~= nil
 end
 
---- Changed files that pass the review filters and the path text filter.
+--- Changed files that pass the filters and the path text filter.
 function M.filtered(s)
-  local v = s.review.view
-  local cats = util.nn(v.categories)
+  local v = s.view
+  local cats = v.categories
   local wanted = cats and {}
   for _, c in ipairs(cats or {}) do
     wanted[c] = true
@@ -294,9 +256,6 @@ function M.filtered(s)
   for _, e in ipairs(s.files) do
     local keep = M.match_query(e.path)
     if keep and v.unviewed and require('revision.viewed').file_viewed(s, e.path) then
-      keep = false
-    end
-    if keep and v.annotated and annotations(s, e.path) == 0 then
       keep = false
     end
     if keep and wanted and not wanted[M.category(s, e.path)] then
@@ -327,10 +286,7 @@ function M.indicators(s)
   if v.unviewed then
     table.insert(f, 'unviewed')
   end
-  if v.annotated then
-    table.insert(f, 'annotated')
-  end
-  local cats = util.nn(v.categories)
+  local cats = v.categories
   if cats and #cats > 0 then
     table.insert(f, table.concat(cats, '+'))
   end
@@ -357,12 +313,7 @@ local function session()
 end
 
 function M.set_sort(key, reverse)
-  local s = session()
-  if key == 'order' and not (s and s.ctx and #s.ctx.order > 0) then
-    util.notify('no agent order in context.json')
-    return
-  end
-  local v = M.state(s)
+  local v = M.state(session())
   v.sort, v.reverse = key, reverse
   refresh()
 end
@@ -388,11 +339,11 @@ local function present(s)
 end
 
 local function categories_menu(s, after)
-  local v = s.review.view
+  local v = s.view
   local items = { 'All' }
   vim.list_extend(items, present(s))
   local selected = {}
-  for _, c in ipairs(util.nn(v.categories) or {}) do
+  for _, c in ipairs(v.categories or {}) do
     selected[c] = true
   end
   vim.ui.select(items, {
@@ -405,10 +356,10 @@ local function categories_menu(s, after)
       return
     end
     if c == 'All' then
-      v.categories = vim.NIL
+      v.categories = nil
     else
       local list = {}
-      for _, x in ipairs(util.nn(v.categories) or {}) do
+      for _, x in ipairs(v.categories or {}) do
         if x ~= c then
           table.insert(list, x)
         end
@@ -416,7 +367,7 @@ local function categories_menu(s, after)
       if not selected[c] then
         table.insert(list, c)
       end
-      v.categories = #list > 0 and list or vim.NIL
+      v.categories = #list > 0 and list or nil
     end
     refresh(after)
   end))
@@ -447,12 +398,9 @@ end
 
 local function filter_items(s, add, after)
   if s then
-    local v = s.review.view
+    local v = s.view
     add(('  Filter: unviewed only [%s]'):format(v.unviewed and 'on' or 'off'), function()
       v.unviewed = not v.unviewed
-    end)
-    add(('  Filter: annotated only [%s]'):format(v.annotated and 'on' or 'off'), function()
-      v.annotated = not v.annotated
     end)
     add('  Filter: categories…', function()
       categories_menu(s, after)
@@ -463,8 +411,7 @@ local function filter_items(s, add, after)
   end, true)
   add('  Clear filters', function()
     if s then
-      local v = s.review.view
-      v.unviewed, v.annotated, v.categories = false, false, vim.NIL
+      s.view.unviewed, s.view.categories = false, nil
     end
     M.query = nil
   end)
@@ -493,18 +440,16 @@ local function collector(items)
   end
 end
 
---- Sort and filter menu. Changes are not marked unsaved; they ride along with the next save.
+--- Sort and filter menu.
 function M.menu(after)
   local s = session()
   local v = M.state(s)
   local items = {}
   local add = collector(items)
   for _, k in ipairs(M.SORTS) do
-    if k ~= 'order' or (s and s.ctx and #s.ctx.order > 0) then
-      add((v.sort == k and '● ' or '  ') .. 'Sort: ' .. (k == 'order' and 'agent order' or k), function()
-        v.sort = k
-      end)
-    end
+    add((v.sort == k and '● ' or '  ') .. 'Sort: ' .. k, function()
+      v.sort = k
+    end)
   end
   add(('  Sort: reverse [%s]'):format(v.reverse and 'on' or 'off'), function()
     v.reverse = not v.reverse

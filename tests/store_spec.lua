@@ -1,94 +1,29 @@
 local h = require('tests.helpers')
 local session = require('revision.session')
 local store = require('revision.store')
+local viewed = require('revision.viewed')
 
-it('save writes JSON with the schema keys into a linked review directory', function()
+it('viewed marks are saved per repo and branch under the state dir, outside the worktree', function()
   local fx = h.start()
-  session.save()
-  local path = store.review_path(fx.s)
+  viewed.set_file(fx.s, 'a.lua', true)
+  local path = store.path(fx.s)
+  assert(path:sub(1, #vim.env.XDG_STATE_HOME) == vim.env.XDG_STATE_HOME, path)
+  assert(path:find('/branch%-feat%.json$'), path)
   local t = vim.json.decode(h.read(path))
-  for _, k in ipairs({
-    'version',
-    'repo',
-    'branch',
-    'base_ref',
-    'merge_base',
-    'head',
-    'verdict',
-    'body',
-    'comments',
-    'viewed_files',
-    'viewed_hunks',
-    'rounds',
-    'next_id',
-    'dismissed_findings',
-    'reviewed_commits',
-    'view',
-  }) do
-    assert(t[k] ~= nil, 'missing key ' .. k)
-  end
-  assert(t.version == 2 and t.head == fx.c2 and t.merge_base == fx.main and t.branch == 'feat')
-  assert(t.pr == nil and t.url == nil)
-  assert(h.read(path):find('"viewed_files": {}', 1, true), 'viewed_files must encode as an object')
-  local link = fx.wt .. '/.revision'
-  assert(vim.uv.fs_lstat(link).type == 'link')
-  assert(vim.uv.fs_realpath(link) == vim.fs.dirname(path))
-  assert(path:sub(-12) == '/review.json', path)
-end)
+  assert(t.version == 1 and t.viewed_files['a.lua'] == fx.s.blobs['a.lua'], vim.inspect(t))
+  assert(#t.viewed_hunks == 3, vim.inspect(t.viewed_hunks))
+  assert(not vim.uv.fs_lstat(fx.wt .. '/.revision'), 'nothing is written into the worktree')
+  assert(h.git(fx.wt, 'status', '--porcelain') == '')
 
-it('a real .revision directory is used as is', function()
-  local fx = h.start({ context = true })
-  session.save()
-  assert(h.read(fx.wt .. '/.revision/review.json'), 'review.json must live in the directory')
-  assert(vim.uv.fs_lstat(fx.wt .. '/.revision').type == 'directory')
-  assert(h.git(fx.wt, 'status', '--porcelain') == '', 'the directory must be ignored')
-end)
-
-it('keeps unknown keys across load and save', function()
-  local fx = h.start()
-  session.save()
-  local path = store.review_path(fx.s)
-  local t = vim.json.decode(h.read(path))
-  t.poster_state = { posted_at = 'x' }
-  h.write(path, vim.json.encode(t))
-  session.stop({ force = true })
-  fx.s = session.start()
-  session.save()
-  local u = vim.json.decode(h.read(path))
-  assert(u.poster_state and u.poster_state.posted_at == 'x')
-end)
-
-it('loads a view saved with a sort that no longer exists as path order', function()
-  local fx = h.start()
-  session.save()
-  local path = store.review_path(fx.s)
-  local t = vim.json.decode(h.read(path))
-  t.view.sort, t.view.reverse = 'category', nil
-  h.write(path, vim.json.encode(t))
-  local v = store.load(path).view
-  assert(v.sort == 'path' and v.reverse == false, vim.inspect(v))
-end)
-
-it('adds /.revision to info/exclude exactly once', function()
-  local fx = h.start()
-  session.save()
-  session.save()
-  local text = h.read(fx.repo .. '/.git/info/exclude')
-  local n = 0
-  for line in vim.gsplit(text, '\n', { plain = true }) do
-    if line == '/.revision' then
-      n = n + 1
-    end
-  end
-  assert(n == 1, 'found ' .. n .. ' entries in\n' .. text)
-  assert(h.git(fx.wt, 'status', '--porcelain') == '', 'symlink must be ignored')
+  viewed.set_file(fx.s, 'a.lua', false)
+  assert(h.read(path):find('"viewed_files": {}', 1, true), 'empty marks must encode as an object')
 end)
 
 it('invalid JSON aborts start and leaves the file alone', function()
   local fx = h.start()
-  session.save()
-  local path = store.review_path(fx.s)
-  session.stop({ force = true })
+  local path = store.path(fx.s)
+  session.stop()
+  vim.fn.mkdir(vim.fs.dirname(path), 'p')
   h.write(path, '{ broken')
   local ok, err = pcall(session.start)
   assert(not ok and err:find('cannot parse'), tostring(err))

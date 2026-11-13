@@ -67,7 +67,7 @@ it('directory folds survive re-renders that move rows', function()
   vim.api.nvim_win_set_cursor(0, { row_of('▾ deep/'), 0 })
   press('zc')
   press(',S')
-  assert(fx.s.review.view.sort == 'size' and fx.s.review.view.reverse, vim.inspect(fx.s.review.view))
+  assert(fx.s.view.sort == 'size' and fx.s.view.reverse, vim.inspect(fx.s.view))
   local deep = row_of('deep/')
   assert(deep and vim.fn.foldclosed(deep) == deep, dump())
   assert(vim.fn.foldclosed(row_of('x.lua')) == deep, 'files of a folded directory stay hidden')
@@ -103,7 +103,7 @@ end)
 
 it('works without a review session and keeps working after one stops', function()
   local fx = tree_fixture()
-  session.stop({ force = true })
+  session.stop()
   panel.toggle()
   assert(row_of('keep.lua') or row_of('▾ lib/'), dump())
   assert(row_of('top.lua'), dump())
@@ -111,26 +111,4 @@ it('works without a review session and keeps working after one stops', function(
   vim.api.nvim_win_set_cursor(0, { row_of('top.lua'), 0 })
   press('<CR>')
   assert(vim.api.nvim_buf_get_name(0):find('top.lua$'), vim.api.nvim_buf_get_name(0))
-end)
-
-it('agent order reasons wrap under the file row instead of being cut at the panel edge', function()
-  local reason = 'the core change: read this before the handler and the tests that cover it'
-  h.start({ context = { order = { { path = 'new.lua', reason = reason } } } })
-  session.s.review.view.sort = 'order'
-  panel.toggle()
-  local win, buf = panel.win(), vim.api.nvim_get_current_buf()
-  local width = vim.api.nvim_win_get_width(win)
-  local row = row_of('new.lua')
-  assert(row and not panel_lines()[row]:find('core', 1, true), dump())
-  local marks = vim.api.nvim_buf_get_extmarks(buf, -1, { row - 1, 0 }, { row - 1, -1 }, { details = true })
-  local text = {}
-  for _, m in ipairs(marks) do
-    for _, vl in ipairs(m[4].virt_lines or {}) do
-      local l = vl[1][1]
-      assert(vim.fn.strdisplaywidth(l) <= width, ('%q is wider than the panel (%d)'):format(l, width))
-      table.insert(text, vim.trim(l))
-    end
-  end
-  assert(#text > 1, vim.inspect(text))
-  assert(table.concat(text, ' ') == reason, vim.inspect(text))
 end)

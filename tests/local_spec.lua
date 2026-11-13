@@ -81,7 +81,7 @@ end)
 
 it('reviews a repository without commits as working changes', function()
   local dir = vim.fn.tempname()
-  vim.env.XDG_DATA_HOME = dir .. '/data'
+  vim.env.XDG_STATE_HOME = dir .. '/state'
   vim.fn.mkdir(dir .. '/r', 'p')
   h.git(dir .. '/r', 'init', '-q', '-b', 'main')
   h.write(dir .. '/r/a.lua', 'return 1\n')
@@ -92,6 +92,5 @@ it('reviews a repository without commits as working changes', function()
   vim.cmd.edit('a.lua')
   assert(#vim.b.revision_hunks == 1 and vim.b.revision_hunks[1].hash == s.hunks['a.lua'][1].hash)
   assert(#range.items(s) == 1)
-  session.save()
   session.stop()
 end)

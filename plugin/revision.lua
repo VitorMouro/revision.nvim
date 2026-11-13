@@ -3,19 +3,17 @@ if vim.g.loaded_revision then
 end
 vim.g.loaded_revision = true
 
-local subs = {
-  'start', 'files', 'range', 'save', 'discard', 'delete', 'stop', 'body', 'verdict', 'comments', 'info', 'reload',
-  'view', 'panel', 'commits', 'tasks',
-}
+local subs = { 'start', 'files', 'range', 'stop', 'view', 'panel', 'commits' }
 
 vim.api.nvim_create_user_command('Revision', function(a)
-  local sub = a.fargs[1] or 'start'
-  if not vim.tbl_contains(subs, sub) then
-    require('revision.util').err('unknown subcommand ' .. sub)
-    return
-  end
+  local arg = a.fargs[1] or 'start'
   require('revision.util').guard(function()
-    require('revision.session')[sub]()
+    local session = require('revision.session')
+    if vim.tbl_contains(subs, arg) then
+      session[arg]()
+    else
+      session.start(arg)
+    end
   end)()
 end, {
   nargs = '?',

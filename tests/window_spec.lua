@@ -31,13 +31,3 @@ it('changed lines highlight to end of line without hiding word highlights', func
   assert(line and line.hl_eol and line.line_hl_group == nil)
   assert(word.priority > line.priority, 'word highlight must win over the line highlight')
 end)
-
-it('quickfix points deleted-file comments at the deleted buffer', function()
-  local fx = h.start({ context = true })
-  require('revision.files').open(fx.s.file_map['del.lua'])
-  require('revision.comments').commit(fx.s, { path = 'del.lua', side = 'LEFT', line = 1, kind = 'note' }, 'gone')
-  require('revision.comments').quickfix()
-  local item = vim.fn.getqflist()[1]
-  assert(vim.api.nvim_buf_get_name(item.bufnr) == 'revision://deleted/del.lua')
-  assert(item.lnum == 1 and not item.text:find('outdated'), item.text)
-end)

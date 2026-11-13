@@ -29,7 +29,7 @@ end)
 
 it('sort and filter drive picker rows and ]f', function()
   local fx = h.start()
-  local v = fx.s.review.view
+  local v = fx.s.view
   v.sort = 'size'
   local sized = files.rows(fx.s)
   local sizes = vim.tbl_map(function(r)
@@ -53,12 +53,4 @@ it('sort and filter drive picker rows and ]f', function()
   assert(expected and expected ~= 'a.lua', vim.inspect(visible))
   files.step(1)
   assert(vim.api.nvim_buf_get_name(0):find(expected .. '$'), vim.api.nvim_buf_get_name(0))
-end)
-
-it('agent order sorts by context order with reasons', function()
-  local fx = h.start({ context = { order = { { path = 'new.lua', reason = 'start here' } } } })
-  fx.s.review.view.sort = 'order'
-  local rows = files.rows(fx.s)
-  assert(rows[1].e.path == 'new.lua', vim.inspect(paths(rows)))
-  assert(rows[1].text:find('start here', 1, true), rows[1].text)
 end)

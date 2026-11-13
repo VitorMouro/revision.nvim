@@ -41,21 +41,32 @@ end)
 it('stop restores the branch', function()
   local fx = h.start()
   range.apply(fx.main, fx.c1, 'custom')
-  session.stop({ force = true })
+  session.stop()
   assert(h.git(fx.wt, 'symbolic-ref', '--short', 'HEAD') == 'feat')
 end)
 
-it('offers "since last review" after a save at an older head', function()
+it('revision specs diff like git diff, HEAD meaning the session head', function()
   local fx = h.start()
-  local kinds = function()
-    return vim.tbl_map(function(i)
-      return i.kind
-    end, range.items(fx.s))
-  end
-  assert(vim.deep_equal(kinds(), { 'working', 'all', 'commit', 'commit' }))
-  fx.s.head = fx.c1
-  session.save()
-  fx.s.head = fx.c2
-  local items = range.items(fx.s)
-  assert(items[3].kind == 'since' and items[3].last == fx.c1, vim.inspect(items[3]))
+  local session = require('revision.session')
+  session.start('main...HEAD')
+  assert(fx.s.range.start == fx.main and fx.s.range.end_ == fx.c2 and fx.s.range.label == 'main...HEAD')
+
+  range.apply(fx.main, fx.c1, 'custom')
+  session.start('HEAD~1..')
+  assert(fx.s.range.start == fx.c1 and fx.s.range.end_ == fx.c2, vim.inspect(fx.s.range))
+  assert(h.git(fx.wt, 'symbolic-ref', '--short', 'HEAD') == 'feat')
+
+  range.apply(fx.main, fx.c1, 'custom')
+  h.write(fx.wt .. '/untracked.lua', 'x\n')
+  session.start(fx.c1)
+  assert(fx.s.range.worktree and fx.s.range.start == fx.c1, vim.inspect(fx.s.range))
+  assert(h.git(fx.wt, 'symbolic-ref', '--short', 'HEAD') == 'feat', 'a worktree diff returns to the branch')
+  assert(fx.s.file_map['new.lua'] and fx.s.file_map['untracked.lua'] and not fx.s.file_map['a.lua'])
+  h.write(fx.wt .. '/new.lua', 'changed\n')
+  range.reload()
+  assert(fx.s.range.start == fx.c1, 'reload keeps the spec start')
+
+  local ok, err = pcall(session.start, 'nope..HEAD')
+  assert(not ok and err:find('unknown revision nope'), tostring(err))
 end)
+

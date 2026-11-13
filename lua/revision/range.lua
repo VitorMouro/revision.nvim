@@ -97,6 +97,7 @@ function M.checkout(s, end_)
   end
 end
 
+
 --- Whether the worktree is at end_; a branch without commits has nothing to check out.
 function M.at(s, end_)
   if not end_ then
@@ -111,11 +112,8 @@ function M.at(s, end_)
   return true
 end
 
---- Without a context file the session follows the branch: new local commits move head and the bases.
+--- The session follows the branch: new local commits move head and the bases.
 function M.refresh_local(s)
-  if s.ctx then
-    return
-  end
   if s.branch then
     local tip = git.out(s.root, { 'rev-parse', '--verify', '-q', 'refs/heads/' .. s.branch }, { allow_fail = true })
     s.head = tip ~= '' and tip or nil
@@ -142,9 +140,7 @@ local function set(s, files, hunks, blobs, range)
   s.hunks = hunks
   s.blobs = blobs
   s.range = range
-  s.review_diff = {}
   s.category_cache = nil
-  require('revision.comments').reanchor(s)
   require('revision.viewed').reconcile(s)
   require('revision.inline').refresh_all()
 end
@@ -226,25 +222,74 @@ local function worktree_blobs(s, files)
   return blobs
 end
 
---- Reviews uncommitted changes: HEAD against the worktree, untracked files as added.
-function M.working()
+--- Diffs start (default HEAD) against the worktree, untracked files as added.
+--- Returns to the branch first when a commit range has it checked out elsewhere.
+function M.working(start, label)
   local s = session()
   M.refresh_local(s)
-  local head = git.try_head(s.root) or git.EMPTY_TREE
-  local name_status = git.run(s.root, { 'diff', '--name-status', '-z', '-M', '--no-color', head })
-  local numstat = git.run(s.root, { 'diff', '--numstat', '-z', '-M', head })
+  if not M.at(s, s.head) then
+    check_clean(s)
+    M.checkout(s, s.head)
+    vim.cmd('silent! checktime')
+  end
+  local base = start or git.try_head(s.root) or git.EMPTY_TREE
+  local name_status = git.run(s.root, { 'diff', '--name-status', '-z', '-M', '--no-color', base })
+  local numstat = git.run(s.root, { 'diff', '--numstat', '-z', '-M', base })
   local files = parse_files(name_status, numstat)
-  local hunks = hunks_for(s.root, { head })
+  local hunks = hunks_for(s.root, { base })
   untracked(s, files, hunks)
-  set(s, files, hunks, worktree_blobs(s, files), { start = head, worktree = true, label = 'working' })
+  set(s, files, hunks, worktree_blobs(s, files), {
+    start = base,
+    worktree = true,
+    label = label or 'working',
+    follow = start == nil,
+  })
 end
 
---- Recomputes the working-changes range after files change on disk; commit ranges are fixed.
+--- Recomputes a worktree range after files change on disk; commit ranges are fixed.
 function M.reload()
   local s = session()
-  if s and s.range and s.range.worktree then
-    M.working()
+  local r = s and s.range
+  if r and r.worktree then
+    M.working(not r.follow and r.start or nil, r.label)
   end
+end
+
+--- Commit sha of rev; HEAD means the session head, not a commit range checked out.
+local function resolve(s, rev)
+  if rev == '' then
+    rev = 'HEAD'
+  end
+  if s.head and rev:match('^HEAD') then
+    rev = s.head .. rev:sub(5)
+  end
+  local sha = git.out(s.root, { 'rev-parse', '--verify', '-q', rev .. '^{commit}' }, { allow_fail = true })
+  if not sha or sha == '' then
+    error('unknown revision ' .. rev, 0)
+  end
+  return sha
+end
+
+--- Diffs a revision spec like git diff: "A..B" diffs A against B, "A...B" the merge
+--- base against B, both checking out B; an empty side is HEAD. A single revision is
+--- diffed against the worktree.
+function M.from_spec(spec)
+  local s = session()
+  M.refresh_local(s)
+  local a, b = spec:match('^(.-)%.%.%.(.*)$')
+  if a then
+    local x, y = resolve(s, a), resolve(s, b)
+    local base = git.out(s.root, { 'merge-base', x, y }, { allow_fail = true })
+    if not base or base == '' then
+      error(spec .. ': no merge base', 0)
+    end
+    return M.apply(base, y, spec)
+  end
+  a, b = spec:match('^(.-)%.%.(.*)$')
+  if a then
+    return M.apply(resolve(s, a), resolve(s, b), spec)
+  end
+  M.working(resolve(s, spec), spec)
 end
 
 local function short(rev)
@@ -254,28 +299,6 @@ end
 function M.describe(r)
   local stop = r.worktree and 'worktree' or short(r.end_)
   return ('%s %s..%s'):format(r.label, short(r.start), stop)
-end
-
---- The newest saved round head that is a strict ancestor of the session head, or nil.
-function M.last_reviewed(s)
-  if not s.head then
-    return nil
-  end
-  local rounds = s.review.rounds or {}
-  local older = false
-  for i = #rounds, 1, -1 do
-    local h = rounds[i].head
-    if h ~= s.head then
-      older = true
-      if git.ok(s.root, { 'merge-base', '--is-ancestor', h, s.head }) then
-        return h
-      end
-    end
-  end
-  if older and not s.warned_force_push then
-    s.warned_force_push = true
-    util.warn("last reviewed head is not in this branch's history (force-push?)")
-  end
 end
 
 --- Commits after the merge base (or upstream base); the last 50 when neither exists.
@@ -301,26 +324,7 @@ function M.parent(s, sha)
   return (p and p ~= '') and p or git.EMPTY_TREE
 end
 
---- Parent of the oldest unreviewed commit, when the range holds both reviewed and unreviewed ones.
-local function unreviewed_start(s)
-  local reviewed = {}
-  for _, sha in ipairs(s.review.reviewed_commits or {}) do
-    reviewed[sha] = true
-  end
-  local first, any = nil, false
-  for _, c in ipairs(M.commits(s)) do
-    if reviewed[c.sha] then
-      any = true
-    elseif not first then
-      first = c.sha
-    end
-  end
-  if first and any then
-    return M.parent(s, first)
-  end
-end
-
---- Picker items: { text, kind = 'working'|'all'|'unpushed'|'since'|'unreviewed'|'commit', ... }.
+--- Picker items: { text, kind = 'working'|'all'|'unpushed'|'commit', ... }.
 function M.items(s)
   M.refresh_local(s)
   local head7 = util.short(s.head)
@@ -341,22 +345,6 @@ function M.items(s)
     table.insert(items, {
       kind = 'unpushed',
       text = ('Unpushed (%s)  %s..%s'):format(s.upstream, util.short(ub), head7),
-    })
-  end
-  local last = M.last_reviewed(s)
-  if last then
-    table.insert(items, {
-      kind = 'since',
-      last = last,
-      text = ('Since last review  %s..%s'):format(util.short(last), head7),
-    })
-  end
-  local unreviewed = unreviewed_start(s)
-  if unreviewed then
-    table.insert(items, {
-      kind = 'unreviewed',
-      start = unreviewed,
-      text = ('Unreviewed commits  %s..%s'):format(short(unreviewed), head7),
     })
   end
   local commits = M.commits(s)
@@ -411,28 +399,17 @@ function M.pick()
       M.apply(s.merge_base, s.head, 'all')
     elseif item.kind == 'unpushed' then
       M.apply(s.upstream_base, s.head, 'unpushed')
-    elseif item.kind == 'since' then
-      M.apply(item.last, s.head, 'since last review')
-    elseif item.kind == 'unreviewed' then
-      M.apply(item.start, s.head, 'unreviewed')
     else
       pick_end(s, item)
     end
   end))
 end
 
---- Initial range: all context changes, else working changes, unpushed commits or branch changes.
+--- Initial range: working changes, else unpushed commits, else branch changes.
 function M.default()
   local s = session()
-  local tracked_dirty = git.out(s.root, { 'status', '--porcelain', '--untracked-files=no' }) ~= ''
-  if s.ctx then
-    if tracked_dirty then
-      util.notify('worktree has local changes; reviewing working changes')
-      return M.working()
-    end
-    return M.apply(s.merge_base, s.head, 'all')
-  end
-  if tracked_dirty or git.out(s.root, { 'status', '--porcelain' }) ~= '' then
+  M.refresh_local(s)
+  if git.out(s.root, { 'status', '--porcelain' }) ~= '' then
     return M.working()
   end
   if s.upstream_base and s.upstream_base ~= s.head then

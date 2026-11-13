@@ -42,7 +42,7 @@ local function numbered(n, fmt)
   return t
 end
 
---- Only git on PATH; data dir under a temp dir.
+--- Only git on PATH; data and state dirs under a temp dir.
 function M.isolate()
   local tmp = vim.fn.tempname()
   local bin = tmp .. '/bin'
@@ -50,6 +50,7 @@ function M.isolate()
   vim.uv.fs_symlink(vim.fn.exepath('git'), bin .. '/git')
   vim.env.PATH = bin
   vim.env.XDG_DATA_HOME = tmp .. '/data'
+  vim.env.XDG_STATE_HOME = tmp .. '/state'
   vim.env.GIT_CONFIG_GLOBAL = '/dev/null'
   vim.env.GIT_CONFIG_NOSYSTEM = '1'
   vim.env.GIT_AUTHOR_NAME, vim.env.GIT_AUTHOR_EMAIL = 'T', 't@x'
@@ -62,7 +63,7 @@ function M.fixture(dir)
   dir = dir or vim.fn.tempname()
   local repo = dir .. '/repo'
   vim.fn.mkdir(repo, 'p')
-  vim.env.XDG_DATA_HOME = dir .. '/data'
+  vim.env.XDG_STATE_HOME = dir .. '/state'
   M.git(repo, 'init', '-q', '-b', 'main')
   local a = numbered(20)
   write(repo .. '/a.lua', table.concat(a, '\n') .. '\n')
@@ -99,26 +100,10 @@ function M.fixture(dir)
   return { repo = repo, wt = wt, main = main, c1 = c1, c2 = c2 }
 end
 
---- Writes <wt>/.revision/context.json for the fixture, merged over the default PR-ish context.
-function M.context(fx, extra)
-  local t = vim.tbl_deep_extend('force', {
-    version = 1,
-    title = 'feat',
-    url = 'https://example.test/pr/7',
-    base = fx.main,
-    base_ref = 'main',
-    head = fx.c2,
-  }, extra or {})
-  write(fx.wt .. '/.revision/context.json', vim.json.encode(t))
-end
-
---- Fresh fixture with the session started in its worktree; opts.context writes a context file.
-function M.start(opts)
+--- Fresh fixture with the session started in its worktree.
+function M.start()
   local fx = M.fixture()
   vim.cmd.cd(vim.fn.fnameescape(fx.wt))
-  if opts and opts.context then
-    M.context(fx, type(opts.context) == 'table' and opts.context or nil)
-  end
   fx.s = require('revision.session').start()
   return fx
 end
@@ -126,7 +111,7 @@ end
 --- Tears down any session and all buffers between tests.
 function M.reset()
   local session = require('revision.session')
-  pcall(session.stop, { force = true })
+  pcall(session.stop)
   session.s = nil
   vim.cmd('silent! %bwipeout!')
 end

@@ -1,6 +1,5 @@
 local util = require('revision.util')
 local git = require('revision.git')
-local store = require('revision.store')
 
 local M = {}
 
@@ -35,14 +34,6 @@ local function in_range(s)
   return set
 end
 
-local function reviewed_set(s)
-  local set = {}
-  for _, sha in ipairs(s.review.reviewed_commits) do
-    set[sha] = true
-  end
-  return set
-end
-
 function M.refresh()
   local win = M.win()
   local s = session()
@@ -50,14 +41,13 @@ function M.refresh()
     return
   end
   local buf = vim.api.nvim_win_get_buf(win)
-  local inside, reviewed = in_range(s), reviewed_set(s)
+  local inside = in_range(s)
   local lines, shas = { 'range: ' .. require('revision.range').describe(s.range) }, {}
   for _, c in ipairs(require('revision.range').commits(s)) do
     table.insert(
       lines,
-      ('%s %s %s %s  %s %s'):format(
+      ('%s %s %s  %s %s'):format(
         inside[c.sha] and '▶' or ' ',
-        reviewed[c.sha] and '✓' or ' ',
         c.sha:sub(1, 7),
         c.subject,
         c.author,
@@ -122,37 +112,6 @@ local function keys(buf)
       error('end must be after the range start', 0)
     end
     r.apply(cur.start, sha, 'custom')
-  end)
-  map('u', function(s, r)
-    for _, item in ipairs(r.items(s)) do
-      if item.kind == 'unreviewed' then
-        r.apply(item.start, s.head, 'unreviewed')
-        return
-      end
-    end
-    util.notify('all commits reviewed')
-  end)
-  map('l', function(s, r)
-    local last = r.last_reviewed(s)
-    if not last then
-      util.notify('no earlier review round')
-      return
-    end
-    r.apply(last, s.head, 'since last review')
-  end)
-  map('m', function(s)
-    local sha = sha_at()
-    local list = s.review.reviewed_commits
-    for i, v in ipairs(list) do
-      if v == sha then
-        table.remove(list, i)
-        store.touch()
-        return
-      end
-    end
-    table.insert(list, sha)
-    table.sort(list)
-    store.touch()
   end)
   map('q', function()
     M.close()

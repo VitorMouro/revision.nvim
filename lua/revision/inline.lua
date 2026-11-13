@@ -5,7 +5,6 @@ local M = {}
 
 M.ns = vim.api.nvim_create_namespace('revision_inline')
 M.ns_words = vim.api.nvim_create_namespace('revision_words')
-M.ns_comments = vim.api.nvim_create_namespace('revision_comments')
 
 --- Per-buffer state: { path, kind = 'file'|'deleted', hunks, near, timer }.
 M.state = {}
@@ -55,7 +54,7 @@ end
 
 local function viewed_set(s)
   local set = {}
-  for _, h in ipairs(s.review.viewed_hunks) do
+  for _, h in ipairs(s.marks.viewed_hunks) do
     set[h] = true
   end
   return set
@@ -261,22 +260,11 @@ function M.update_winbar(buf)
   end
 end
 
---- Text-area width of the narrowest window showing buf, for wrapping comment blocks.
-local function text_width(buf)
-  local w
-  for _, win in ipairs(vim.fn.win_findbuf(buf)) do
-    local info = vim.fn.getwininfo(win)[1]
-    w = math.min(w or math.huge, info.width - info.textoff)
-  end
-  return w or vim.o.columns
-end
-
 function M.render(buf)
   local s, st = session(), M.state[buf]
   if not (s and st and vim.api.nvim_buf_is_valid(buf)) then
     return
   end
-  local comments = require('revision.comments')
   local cfg = require('revision.config').opts
   local ts = vim.bo[buf].tabstop
   local deleted = st.kind == 'deleted'
@@ -285,15 +273,13 @@ function M.render(buf)
     return { sa = h.sa, ca = h.ca, sb = h.sb, cb = h.cb, anchor = h.anchor, hash = h.hash }
   end, st.hunks)
 
-  for _, ns in ipairs({ M.ns, M.ns_words, M.ns_comments }) do
+  for _, ns in ipairs({ M.ns, M.ns_words }) do
     vim.api.nvim_buf_clear_namespace(buf, ns, 0, -1)
   end
   local viewed = viewed_set(s)
   local near = {}
   local ctx = cfg.context_lines
-  local right, left = comments.for_buffer(s, st)
   local nlines = vim.api.nvim_buf_line_count(buf)
-  local width = text_width(buf)
 
   if deleted then
     vim.api.nvim_buf_set_extmark(buf, M.ns, 0, 0, {
@@ -304,12 +290,6 @@ function M.render(buf)
       strict = false,
       priority = 5,
     })
-  end
-
-  local left_by_line, note_rows = {}, {}
-  for _, c in ipairs(left) do
-    left_by_line[c.line] = left_by_line[c.line] or {}
-    table.insert(left_by_line[c.line], c)
   end
 
   for _, h in ipairs(st.hunks) do
@@ -357,12 +337,6 @@ function M.render(buf)
         local vl = {}
         for i, text in ipairs(h.old_lines) do
           table.insert(vl, deleted_virt_line(text, spans_old[i], ts))
-          for _, c in ipairs(left_by_line[h.sa + i - 1] or {}) do
-            note_rows[h.anchor + 1] = true
-            if s.show_comments then
-              vim.list_extend(vl, comments.block(c, true, width))
-            end
-          end
         end
         vim.api.nvim_buf_set_extmark(buf, M.ns, h.anchor, 0, {
           virt_lines = vl,
@@ -380,36 +354,6 @@ function M.render(buf)
       end
     end
   end
-
-  -- One extmark per row: separate virt_lines extmarks on a row draw newest first.
-  local blocks, rows = {}, {}
-  for _, c in ipairs(right) do
-    local first = util.nn(c.start_line) or c.line
-    if c.line <= nlines then
-      local hl = comments.hl(c)
-      for l = first, c.line do
-        vim.api.nvim_buf_set_extmark(buf, M.ns_comments, l - 1, 0, {
-          sign_text = comments.sign(c),
-          sign_hl_group = hl,
-          priority = 10,
-        })
-      end
-      note_rows[first] = true
-      if s.show_comments then
-        if not blocks[c.line] then
-          blocks[c.line] = {}
-          table.insert(rows, c.line)
-        end
-        vim.list_extend(blocks[c.line], comments.block(c, false, width))
-      end
-      mark_near(near, first, c.line, 0)
-    end
-  end
-  for _, line in ipairs(rows) do
-    vim.api.nvim_buf_set_extmark(buf, M.ns_comments, line - 1, 0, { virt_lines = blocks[line] })
-  end
-  st.note_rows = vim.tbl_keys(note_rows)
-  table.sort(st.note_rows)
 
   st.near = near
   M.update_winbar(buf)
@@ -483,7 +427,7 @@ function M.restore_wins(s)
 end
 
 local function clear(buf)
-  for _, ns in ipairs({ M.ns, M.ns_words, M.ns_comments }) do
+  for _, ns in ipairs({ M.ns, M.ns_words }) do
     pcall(vim.api.nvim_buf_clear_namespace, buf, ns, 0, -1)
   end
 end
@@ -644,30 +588,6 @@ function M.jump(dir)
     vim.api.nvim_win_set_cursor(0, { target + 1, 0 })
     vim.cmd('normal! zv')
   end
-end
-
---- Moves to the next or previous annotation row; stops at the ends.
-function M.jump_note(dir)
-  local st = M.state[vim.api.nvim_get_current_buf()]
-  if not st or not st.note_rows then
-    return
-  end
-  local row = vim.api.nvim_win_get_cursor(0)[1]
-  local target
-  for _, r in ipairs(st.note_rows) do
-    if dir > 0 and r > row and (not target or r < target) then
-      target = r
-    elseif dir < 0 and r < row and (not target or r > target) then
-      target = r
-    end
-  end
-  if not target then
-    util.notify(dir > 0 and 'last annotation' or 'first annotation')
-    return
-  end
-  vim.cmd("normal! m'")
-  vim.api.nvim_win_set_cursor(0, { target, 0 })
-  vim.cmd('normal! zv')
 end
 
 function M.toggle_editable()

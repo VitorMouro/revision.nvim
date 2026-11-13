@@ -18,13 +18,13 @@ local function marker(s, path)
 end
 
 function M.file_viewed(s, path)
-  local v = s.review.viewed_files[path]
+  local v = s.marks.viewed_files[path]
   return v ~= nil and v == marker(s, path)
 end
 
 function M.hunk_counts(s, path)
   local set = {}
-  for _, h in ipairs(s.review.viewed_hunks) do
+  for _, h in ipairs(s.marks.viewed_hunks) do
     set[h] = true
   end
   local list = s.hunks[path] or {}
@@ -44,7 +44,7 @@ local function set_hunks(s, path, on)
     want[h.hash] = true
   end
   local list = {}
-  for _, v in ipairs(s.review.viewed_hunks) do
+  for _, v in ipairs(s.marks.viewed_hunks) do
     if not want[v] then
       table.insert(list, v)
     end
@@ -55,22 +55,22 @@ local function set_hunks(s, path, on)
     end
   end
   table.sort(list)
-  s.review.viewed_hunks = list
+  s.marks.viewed_hunks = list
 end
 
 --- A file is viewed exactly when all of its hunks are; keeps the two marks in step.
 local function sync_file(s, path)
   local n, total = M.hunk_counts(s, path)
   if total > 0 and n == total then
-    s.review.viewed_files[path] = marker(s, path)
+    s.marks.viewed_files[path] = marker(s, path)
   else
-    s.review.viewed_files[path] = nil
+    s.marks.viewed_files[path] = nil
   end
 end
 
---- Repairs marks that disagree, e.g. review files written before hunks followed files.
+--- Repairs marks that disagree, e.g. a file marked whose hunks were not.
 function M.reconcile(s)
-  for path in pairs(s.review.viewed_files) do
+  for path in pairs(s.marks.viewed_files) do
     if M.file_viewed(s, path) then
       set_hunks(s, path, true)
     end
@@ -78,16 +78,16 @@ function M.reconcile(s)
   for path in pairs(s.hunks or {}) do
     local n, total = M.hunk_counts(s, path)
     if total > 0 and n == total and not M.file_viewed(s, path) then
-      s.review.viewed_files[path] = marker(s, path)
+      s.marks.viewed_files[path] = marker(s, path)
     end
   end
 end
 
 --- Marks one file viewed or unviewed, keeping its hunks and any open buffer in step.
 function M.set_file(s, path, on)
-  s.review.viewed_files[path] = on and marker(s, path) or nil
+  s.marks.viewed_files[path] = on and marker(s, path) or nil
   set_hunks(s, path, on)
-  store.touch()
+  store.save(s)
   for buf, st in pairs(inline.state) do
     if st.path == path and vim.api.nvim_buf_is_valid(buf) then
       inline.render(buf)
@@ -114,7 +114,7 @@ function M.toggle_hunk()
     util.notify('no hunk at cursor')
     return
   end
-  local list = s.review.viewed_hunks
+  local list = s.marks.viewed_hunks
   local found
   for i, v in ipairs(list) do
     if v == h.hash then
@@ -130,7 +130,7 @@ function M.toggle_hunk()
   if st then
     sync_file(s, st.path)
   end
-  store.touch()
+  store.save(s)
   require('revision.panel').refresh()
   inline.render(buf)
   inline.jump(1)

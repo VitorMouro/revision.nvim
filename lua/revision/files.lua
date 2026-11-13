@@ -24,7 +24,6 @@ end
 --- Row of a file, one value per column.
 local function fields(s, e)
   local n, total = viewed.hunk_counts(s, e.path)
-  local counts = require('revision.comments').counts(s, e.path)
   return {
     viewed = viewed.file_viewed(s, e.path) and '✓' or ' ',
     path = e.path,
@@ -32,10 +31,7 @@ local function fields(s, e)
     dels = '-' .. e.deletions,
     hn = tostring(n),
     ht = tostring(total),
-    comments = counts.comments,
-    findings = counts.findings,
     category = view.category(s, e.path),
-    reason = view.reason(s, e.path) or '',
     flag = flag(e),
   }
 end
@@ -44,12 +40,6 @@ M.fields = fields
 function M.format(s, e)
   local f = fields(s, e)
   local parts = { f.viewed .. ' ' .. f.path, f.adds .. ' ' .. f.dels, ('h:%s/%s'):format(f.hn, f.ht) }
-  if f.comments > 0 then
-    table.insert(parts, 'c:' .. f.comments)
-  end
-  if f.findings > 0 then
-    table.insert(parts, 'f:' .. f.findings)
-  end
   if f.flag ~= '' then
     table.insert(parts, f.flag)
   end
@@ -68,41 +58,24 @@ end
 --- Picker rows with every column padded to a common width.
 function M.rows(s)
   local rows = {}
-  local w = { path = 0, adds = 0, dels = 0, hn = 0, ht = 0, comments = 0, findings = 0, category = 0 }
+  local w = { path = 0, adds = 0, dels = 0, hn = 0, ht = 0, category = 0 }
   for _, e in ipairs(view.visible(s)) do
     local f = fields(s, e)
     f.e = e
     for _, k in ipairs({ 'path', 'adds', 'dels', 'hn', 'ht', 'category' }) do
       w[k] = math.max(w[k], vim.fn.strdisplaywidth(f[k]))
     end
-    w.comments = math.max(w.comments, #tostring(f.comments))
-    w.findings = math.max(w.findings, #tostring(f.findings))
     table.insert(rows, f)
   end
-  local any_comments, any_findings = false, false
-  for _, f in ipairs(rows) do
-    any_comments = any_comments or f.comments > 0
-    any_findings = any_findings or f.findings > 0
-  end
-  local with_reason = s.review.view.sort == 'order'
   for _, f in ipairs(rows) do
     local parts = {
       f.viewed .. ' ' .. pad(f.path, w.path),
       pad(f.adds, w.adds, true) .. ' ' .. pad(f.dels, w.dels, true),
       ('h:%s/%s'):format(pad(f.hn, w.hn, true), pad(f.ht, w.ht)),
     }
-    if any_comments then
-      table.insert(parts, pad(f.comments > 0 and ('c:' .. f.comments) or '', w.comments + 2, true))
-    end
-    if any_findings then
-      table.insert(parts, pad(f.findings > 0 and ('f:' .. f.findings) or '', w.findings + 2, true))
-    end
     table.insert(parts, pad(f.category, w.category))
     if f.flag ~= '' then
       table.insert(parts, f.flag)
-    end
-    if with_reason and f.reason ~= '' then
-      table.insert(parts, f.reason)
     end
     f.text = (table.concat(parts, '  '):gsub('%s+$', ''))
   end

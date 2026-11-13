@@ -10,7 +10,6 @@ it('a viewed file becomes unviewed when a new commit changes it', function()
     viewed.toggle_file()
     assert(viewed.file_viewed(fx.s, p))
   end
-  session.save()
   session.stop()
 
   vim.cmd('silent! %bwipeout!')
@@ -51,9 +50,9 @@ it('file and hunk marks stay in sync in both directions', function()
   assert(viewed.file_viewed(fx.s, 'a.lua'), 'viewing every hunk must view the file')
 end)
 
-it('legacy marks are reconciled when the range loads', function()
+it('disagreeing marks are reconciled when the range loads', function()
   local fx = h.start()
-  local r = fx.s.review
+  local r = fx.s.marks
   r.viewed_files = { ['a.lua'] = fx.s.blobs['a.lua'] }
   r.viewed_hunks = {}
   range.apply(fx.s.range.start, fx.s.range.end_, 'all')

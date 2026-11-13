@@ -11,7 +11,7 @@ local ns_current = vim.api.nvim_create_namespace('revision_panel_current')
 
 --- Per-render row map: { [row] = { kind = 'dir'|'file', path, e?, name_col, name_end } }.
 M.rows = {}
---- Show every file of the repo, not only the changed ones. Always on outside a review.
+--- Show every file of the repo, not only the changed ones. Always on outside a session.
 M.all = false
 
 local levels = {}
@@ -96,14 +96,7 @@ end
 
 local function file_text(s, e, prefix)
   local f = require('revision.files').fields(s, e)
-  local parts = { prefix .. f.viewed .. ' ', f.adds .. ' ' .. f.dels }
-  if f.comments > 0 then
-    table.insert(parts, 'c:' .. f.comments)
-  end
-  if f.findings > 0 then
-    table.insert(parts, 'f:' .. f.findings)
-  end
-  return parts[1], table.concat(parts, '  ', 2)
+  return prefix .. f.viewed .. ' ', f.adds .. ' ' .. f.dels
 end
 
 --- Rows of the tree under node, depth-first. Returns the directory rows in order.
@@ -183,26 +176,6 @@ local function key_of(meta)
   return meta and (meta.kind .. ':' .. meta.path)
 end
 
---- The agent's reading-order reason under the file row, word-wrapped to the panel: the panel is
---- too narrow to fit it after the name.
-local function reason_lines(win, line, meta, reason)
-  local indent = vim.fn.strdisplaywidth(line:sub(1, meta.name_col)) + 2
-  local width = math.max(12, vim.api.nvim_win_get_width(win) - indent - 1)
-  local out, cur = {}, ''
-  for word in reason:gmatch('%S+') do
-    if cur ~= '' and vim.fn.strdisplaywidth(cur .. ' ' .. word) > width then
-      table.insert(out, cur)
-      cur = word
-    else
-      cur = cur == '' and word or (cur .. ' ' .. word)
-    end
-  end
-  table.insert(out, cur)
-  return vim.tbl_map(function(l)
-    return { { string.rep(' ', indent) .. l, 'RevisionViewed' } }
-  end, out)
-end
-
 function M.refresh()
   local win = M.win()
   -- BufEnter fires while toggle is still setting up the window.
@@ -276,7 +249,6 @@ function M.refresh()
 
   vim.api.nvim_buf_clear_namespace(buf, ns, 0, -1)
   local viewed = require('revision.viewed')
-  local reasons = s and view.state(s).sort == 'order'
   for row, meta in pairs(rows) do
     local hl = meta.kind == 'dir' and 'Directory' or (not meta.e and 'RevisionUnchanged') or nil
     if hl then
@@ -284,10 +256,6 @@ function M.refresh()
     end
     if meta.e and viewed.file_viewed(s, meta.path) then
       vim.api.nvim_buf_set_extmark(buf, ns, row - 1, 0, { line_hl_group = 'RevisionViewed' })
-    end
-    local reason = reasons and meta.e and view.reason(s, meta.path)
-    if reason and reason ~= '' then
-      vim.api.nvim_buf_set_extmark(buf, ns, row - 1, 0, { virt_lines = reason_lines(win, lines[row], meta, reason) })
     end
   end
   M.mark_current()
@@ -386,7 +354,7 @@ end
 
 local function toggle_all()
   if not session() then
-    util.notify('no review session; every file is shown')
+    util.notify('no session; every file is shown')
     return
   end
   M.all = not M.all
@@ -430,10 +398,6 @@ local KEYMAPS = {
   { ',P', 'sort by path, reversed', sort('path', true) },
   { ',s', 'sort by size', sort('size', false) },
   { ',S', 'sort by size, reversed', sort('size', true) },
-  { ',a', 'sort by activity', sort('activity', false) },
-  { ',A', 'sort by activity, reversed', sort('activity', true) },
-  { ',o', 'sort by agent order', sort('order', false) },
-  { ',O', 'sort by agent order, reversed', sort('order', true) },
   { 'R', 'rescan files', rescan },
   {
     '?',

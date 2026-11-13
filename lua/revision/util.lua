@@ -53,22 +53,10 @@ function M.lines(text)
   return l
 end
 
-function M.nn(v)
-  if v == vim.NIL then
-    return nil
-  end
-  return v
-end
-
 function M.short(sha)
   return sha and sha:sub(1, 7) or '-------'
 end
 
-function M.now()
-  return os.date('!%Y-%m-%dT%H:%M:%SZ')
-end
-
---- Wraps fn so errors become notifications instead of stack traces.
 function M.guard(fn)
   return function(...)
     local ok, e = pcall(fn, ...)
