@@ -31,3 +31,25 @@ it('changed lines highlight to end of line without hiding word highlights', func
   assert(line and line.hl_eol and line.line_hl_group == nil)
   assert(word.priority > line.priority, 'word highlight must win over the line highlight')
 end)
+
+it('diff tints fade the Diff* background toward the editor background', function()
+  local function bg(name)
+    return vim.api.nvim_get_hl(0, { name = name, link = false }).bg
+  end
+  local config = require('revision.config')
+  vim.cmd('hi clear')
+  vim.api.nvim_set_hl(0, 'DiffChange', { bg = 0x6464c8 })
+  vim.api.nvim_set_hl(0, 'Normal', { bg = 0x000000 })
+  require('revision').define_highlights()
+  assert(bg('RevisionChange') == 0x282850, ('%06x'):format(bg('RevisionChange') or 0))
+
+  vim.cmd('hi clear')
+  vim.api.nvim_set_hl(0, 'DiffChange', { bg = 0x6464c8 })
+  vim.api.nvim_set_hl(0, 'Normal', {})
+  config.opts.bg = '#ffffff'
+  require('revision').define_highlights()
+  config.opts.bg = nil
+  assert(bg('RevisionChange') == 0xc1c1e9, 'a transparent Normal falls back to the bg option')
+  vim.cmd('hi clear')
+  require('revision').define_highlights()
+end)

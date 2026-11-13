@@ -34,6 +34,7 @@ require('revision').setup({
   keymaps = true,      -- false to bind your own
   categories = {},     -- {glob, category} rules for the category filter
   panel_width = 40,
+  bg = nil,            -- editor bg for fading the diff tints when Normal has none (transparent themes)
   agent = { tool = nil }, -- sidekick tool name
 })
 ```

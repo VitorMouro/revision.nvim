@@ -7,6 +7,7 @@ M.defaults = {
   keymaps = true,
   categories = {},
   panel_width = 40,
+  bg = nil,
   agent = { tool = nil },
 }
 
