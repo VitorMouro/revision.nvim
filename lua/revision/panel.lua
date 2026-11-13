@@ -11,7 +11,7 @@ local ns_current = vim.api.nvim_create_namespace('revision_panel_current')
 
 --- Per-render row map: { [row] = { kind = 'dir'|'file', path, e?, name_col, name_end } }.
 M.rows = {}
---- Show every file of the repo, not only the changed ones. Always on outside a session.
+--- Show every file of the repo, not only the changed ones.
 M.all = false
 
 local levels = {}
@@ -186,11 +186,11 @@ function M.refresh()
   if s and not s.range then
     return
   end
-  local all = M.all or not s
+  local all = M.all
   if all and (not listing or (s and listing.root ~= s.root)) then
     scan()
   end
-  local root = s and s.root or listing.root
+  local root = s and s.root or (listing and listing.root) or vim.fn.getcwd()
   local buf = vim.api.nvim_win_get_buf(win)
 
   local same = rendered_win == win
@@ -225,9 +225,7 @@ function M.refresh()
   local lines, rows = { header }, {}
   levels = { 0 }
   local dirs = {}
-  if #list == 0 then
-    table.insert(lines, 'no files match the view')
-  else
+  if #list > 0 then
     dirs = render(s, view.tree(s, list), lines, rows)
   end
 
@@ -353,10 +351,6 @@ local function toggle_viewed()
 end
 
 local function toggle_all()
-  if not session() then
-    util.notify('no session; every file is shown')
-    return
-  end
   M.all = not M.all
   if M.all then
     listing = nil
@@ -544,6 +538,7 @@ function M.toggle()
   wo.winhighlight = 'Folded:Normal'
   rendered_win = nil
   listing = nil
+  M.all = false
   M.refresh()
   if vim.api.nvim_buf_line_count(0) > 1 then
     vim.api.nvim_win_set_cursor(win, { 2, 0 })

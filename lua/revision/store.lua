@@ -63,4 +63,45 @@ function M.save(s)
   end
 end
 
+local function checkouts_dir()
+  return vim.fn.stdpath('state') .. '/revision/checkouts'
+end
+
+local function checkout_path(root)
+  return checkouts_dir() .. '/' .. root:gsub('[^%w._-]', '_') .. '.json'
+end
+
+--- Records that this Neovim detached root at sha away from branch, so a crash can be undone.
+function M.mark_detached(root, branch, sha)
+  vim.fn.mkdir(checkouts_dir(), 'p')
+  local path = checkout_path(root)
+  local f = assert(io.open(path .. '.tmp', 'w'))
+  f:write(vim.json.encode({ root = root, branch = branch, sha = sha, pid = vim.fn.getpid() }), '\n')
+  f:close()
+  assert(vim.uv.fs_rename(path .. '.tmp', path))
+end
+
+function M.clear_detached(root)
+  os.remove(checkout_path(root))
+end
+
+--- The detach record of the worktree containing dir, or nil. Reads no git, so it is
+--- cheap enough for startup.
+function M.detached_under(dir)
+  for name, kind in vim.fs.dir(checkouts_dir()) do
+    if kind == 'file' and name:sub(-5) == '.json' then
+      local f = io.open(checkouts_dir() .. '/' .. name, 'r')
+      local ok, t = pcall(vim.json.decode, f and f:read('*a') or '')
+      if f then
+        f:close()
+      end
+      if ok and type(t) == 'table' and type(t.root) == 'string' then
+        if dir == t.root or dir:sub(1, #t.root + 1) == t.root .. '/' then
+          return t
+        end
+      end
+    end
+  end
+end
+
 return M

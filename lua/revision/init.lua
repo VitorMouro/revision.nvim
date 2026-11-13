@@ -70,6 +70,17 @@ function M.setup(opts)
   if config.opts.keymaps then
     require('revision.keys').global()
   end
+  vim.schedule(function()
+    require('revision.range').recover(vim.fn.getcwd())
+  end)
+end
+
+--- Short session description for a statusline, or nil without a session.
+function M.status()
+  local s = require('revision.session').s
+  if s and s.range then
+    return 'rev: ' .. require('revision.range').describe(s.range)
+  end
 end
 
 return M

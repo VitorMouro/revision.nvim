@@ -70,3 +70,53 @@ it('revision specs diff like git diff, HEAD meaning the session head', function(
   assert(not ok and err:find('unknown revision nope'), tostring(err))
 end)
 
+--- Pid of a process that has exited.
+local function dead_pid()
+  local p = vim.system({ 'git', '--version' })
+  local pid = p.pid
+  p:wait()
+  return pid
+end
+
+it('a branch left detached by a session that died is restored on the next start', function()
+  local fx = h.start()
+  local session = require('revision.session')
+  range.apply(fx.main, fx.c1, 'custom')
+  range.recover(fx.wt)
+  assert(h.git(fx.wt, 'rev-parse', 'HEAD') == fx.c1, 'a record whose Neovim still runs is left alone')
+  -- Simulate a crash: the session vanishes without stop, and its Neovim is gone.
+  pcall(vim.api.nvim_del_augroup_by_name, 'revision')
+  session.s = nil
+  local record = vim.fs.find(function(name)
+    return name:match('%.json$')
+  end, { path = vim.env.XDG_STATE_HOME .. '/nvim/revision/checkouts' })[1]
+  local t = vim.json.decode(h.read(record))
+  assert(t.pid == vim.fn.getpid(), vim.inspect(t))
+  t.pid = dead_pid()
+  h.write(record, vim.json.encode(t))
+  local s = session.start()
+  assert(h.git(fx.wt, 'symbolic-ref', '--short', 'HEAD') == 'feat' and s.branch == 'feat')
+
+  range.apply(fx.main, fx.c1, 'custom')
+  pcall(vim.api.nvim_del_augroup_by_name, 'revision')
+  session.s = nil
+  h.git(fx.wt, 'checkout', '-q', '--detach', fx.main)
+  vim.cmd('silent! %bwipeout!')
+  local record2 = vim.fs.find(function(name)
+    return name:match('%.json$')
+  end, { path = vim.env.XDG_STATE_HOME .. '/nvim/revision/checkouts' })[1]
+  local t2 = vim.json.decode(h.read(record2))
+  t2.pid = dead_pid()
+  h.write(record2, vim.json.encode(t2))
+  range.recover(fx.wt)
+  assert(h.git(fx.wt, 'rev-parse', 'HEAD') == fx.main, 'a HEAD the user moved is left alone')
+  h.git(fx.wt, 'checkout', '-q', 'feat')
+  range.recover(fx.wt)
+  assert(h.git(fx.wt, 'rev-parse', 'HEAD') == fx.c2, 'the record is gone after the first look')
+end)
+
+it('status describes the running session', function()
+  assert(require('revision').status() == nil)
+  h.start()
+  assert(require('revision').status():find('^rev: '), require('revision').status())
+end)

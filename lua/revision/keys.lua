@@ -24,6 +24,7 @@ local global = {
   { 'n', '<leader>rv', session_call('view'), 'view (sort/filter)' },
   { 'n', '<leader>rr', session_call('range'), 'range' },
   { 'n', '<leader>rk', session_call('commits'), 'commits' },
+  { 'n', '<leader>rx', session_call('stop'), 'stop session' },
   { 'n', '<leader>rs', call('search', 'grep'), 'rg changed lines' },
   { 'n', '<leader>rz', call('search', 'fuzzy'), 'fuzzy search changed lines' },
 }

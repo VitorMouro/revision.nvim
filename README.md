@@ -42,7 +42,10 @@ require('revision').setup({
 ## Use
 
 `:Revision` starts a session on the default range: working changes when the
-tree is dirty, else unpushed commits, else the branch against its base.
+tree is dirty, else unpushed commits, else the branch against its base. The
+default range never moves `HEAD`. While a session runs, every file of the repo
+you open shows its diff inline; `:Revision stop` (`<leader>rx`) ends it and
+restores the windows. Opening the panel or any picker starts one.
 
 `:Revision <rev>` diffs a revision like `git diff` does:
 
@@ -55,7 +58,13 @@ tree is dirty, else unpushed commits, else the branch against its base.
 An empty side means `HEAD`, and `HEAD` is the branch the session started on.
 A range whose end is not the working tree checks that commit out (detached),
 so buffers are real files with LSP; it refuses while the tree has uncommitted
-changes, and the branch is restored when the session stops.
+changes, and the branch is restored when the session stops or Neovim exits.
+If Neovim dies while detached, the branch is restored on the next start in
+that repo (unless you moved `HEAD` yourself or have uncommitted changes).
+Another Neovim on the same repo leaves a running session's checkout alone.
+
+`require('revision').status()` returns e.g. `rev: working abc1234..worktree`
+while a session runs, nil otherwise, for a statusline.
 
 Subcommands:
 
@@ -72,10 +81,11 @@ Viewed marks are saved per repository and branch under
 
 ### File panel
 
-`:Revision panel` (`<leader>rf`) opens a file tree and focuses it. It works
-without a session too, as a plain explorer of the repo (or of the current
-directory outside git). In a session it shows the changed files; `.` adds the
-rest of the repo, with unchanged directories folded. Directories fold with the
+`:Revision panel` (`<leader>rf`) opens a file tree of the changed files and
+focuses it, starting a session if needed; it is empty when nothing changed.
+`.` adds the rest of the repo, with unchanged directories folded. Outside git
+there is no session: the panel starts empty and `.` lists the current
+directory. Directories fold with the
 usual `z` commands.
 
 The winbar shows the sort and the filter. Sort keys follow yazi: `,p` path,
@@ -88,7 +98,7 @@ changed files only. `?` lists the panel keys.
 ### Keymaps
 
 Global, under `<leader>r`: `f` panel, `o` files, `v` view, `r` range, `k`
-commits, `s` search changed lines with ripgrep (regex, live), `z` fuzzy search
+commits, `x` stop the session, `s` search changed lines with ripgrep (regex, live), `z` fuzzy search
 changed lines. Both cover added and deleted lines; picking a deleted line jumps
 to where it was removed.
 

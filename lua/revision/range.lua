@@ -90,13 +90,52 @@ end
 
 --- Checks out end_ (the branch when end_ is the session head). No safety checks.
 function M.checkout(s, end_)
+  local store = require('revision.store')
   if end_ == s.head and s.branch then
     git.run(s.root, { 'checkout', '--quiet', s.branch })
+    store.clear_detached(s.root)
   else
+    if s.branch then
+      store.mark_detached(s.root, s.branch, end_)
+    end
     git.run(s.root, { 'checkout', '--quiet', '--detach', end_ })
   end
 end
 
+--- Whether the Neovim that wrote a detach record still runs; EPERM means it does.
+local function alive(pid)
+  if type(pid) ~= 'number' then
+    return false
+  end
+  local ok, _, name = vim.uv.kill(pid, 0)
+  return ok == 0 or name == 'EPERM'
+end
+
+--- Puts back the branch revision left detached when Neovim died mid-session. Skips
+--- records whose Neovim still runs: that session owns the checkout. Leaves HEAD alone,
+--- dropping the record, when the user has moved it since.
+function M.recover(dir)
+  local store = require('revision.store')
+  local t = store.detached_under(dir)
+  if not t or alive(t.pid) then
+    return
+  end
+  store.clear_detached(t.root)
+  if git.current_branch(t.root) or git.try_head(t.root) ~= t.sha then
+    return
+  end
+  if git.out(t.root, { 'status', '--porcelain', '--untracked-files=no' }, { allow_fail = true }) ~= '' then
+    util.warn(('%s was left detached at %s; local changes, so not restoring %s'):format(t.root, util.short(t.sha), t.branch))
+    return
+  end
+  local ok = git.run(t.root, { 'checkout', '--quiet', t.branch }, { allow_fail = true })
+  if ok then
+    util.notify(('restored branch %s (left detached at %s by an interrupted session)'):format(t.branch, util.short(t.sha)))
+    vim.cmd('silent! checktime')
+  else
+    util.warn(('could not restore branch %s in %s'):format(t.branch, t.root))
+  end
+end
 
 --- Whether the worktree is at end_; a branch without commits has nothing to check out.
 function M.at(s, end_)

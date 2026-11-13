@@ -81,6 +81,8 @@ function M.start(spec)
   require('revision').define_highlights()
   local cfg = require('revision.config').opts
   local root = git.toplevel(vim.fn.getcwd())
+  local range = require('revision.range')
+  range.recover(root)
   local head = git.try_head(root)
 
   local s = {
@@ -99,7 +101,6 @@ function M.start(spec)
   M.s = s
   local ok, e = pcall(function()
     setup_autocmds(s)
-    local range = require('revision.range')
     if spec then
       range.from_spec(spec)
     else
@@ -128,7 +129,11 @@ function M.view()
   require('revision.view').menu()
 end
 
+--- Toggles the panel, starting a session first inside a git repository.
 function M.panel()
+  if git.out(vim.fn.getcwd(), { 'rev-parse', '--show-toplevel' }, { allow_fail = true }) then
+    M.start()
+  end
   require('revision.panel').toggle()
 end
 
