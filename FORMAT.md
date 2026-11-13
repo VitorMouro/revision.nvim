@@ -33,9 +33,10 @@ any time. `version` is `2`. Keys:
 - `next_id`
 - `dismissed_findings`: sorted list of finding ids
 - `reviewed_commits`: sorted list of shas
-- `view`: `{sort, unviewed, annotated, categories}`
-  - `sort` is `"category" | "path" | "size" | "activity" | "order"`
-  - `unviewed` and `annotated` are bools
+- `view`: `{sort, reverse, unviewed, annotated, categories}`
+  - `sort` is `"path" | "size" | "activity" | "order"`; any other value loads
+    as `"path"`
+  - `reverse`, `unviewed` and `annotated` are bools
   - `categories` is a list of category labels, or null (null means all)
 
 A comment is:

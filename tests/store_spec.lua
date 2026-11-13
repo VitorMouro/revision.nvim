@@ -58,6 +58,17 @@ it('keeps unknown keys across load and save', function()
   assert(u.poster_state and u.poster_state.posted_at == 'x')
 end)
 
+it('loads a view saved with a sort that no longer exists as path order', function()
+  local fx = h.start()
+  session.save()
+  local path = store.review_path(fx.s)
+  local t = vim.json.decode(h.read(path))
+  t.view.sort, t.view.reverse = 'category', nil
+  h.write(path, vim.json.encode(t))
+  local v = store.load(path).view
+  assert(v.sort == 'path' and v.reverse == false, vim.inspect(v))
+end)
+
 it('adds /.revision to info/exclude exactly once', function()
   local fx = h.start()
   session.save()

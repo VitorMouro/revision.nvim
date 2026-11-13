@@ -68,12 +68,6 @@ local function setup_autocmds(s)
       end
     end,
   })
-  vim.api.nvim_create_autocmd('BufEnter', {
-    group = group,
-    callback = function()
-      require('revision.panel').refresh()
-    end,
-  })
   vim.api.nvim_create_autocmd('BufWritePost', {
     group = group,
     callback = util.guard(function(a)
@@ -123,7 +117,6 @@ function M.start()
     show_comments = true,
     saved_wo = {},
     review_diff = {},
-    panel_collapsed = { Generated = true, Mechanical = true },
   }
   s.dir = store.dir(s)
   s.ctx = context.load(store.context_path(s))
@@ -172,7 +165,6 @@ function M.view()
 end
 
 function M.panel()
-  M.start()
   require('revision.panel').toggle()
 end
 
@@ -247,14 +239,15 @@ function M.stop(opts)
     end
     vim.cmd('silent! checktime')
   end
-  require('revision.panel').close()
   require('revision.commits').close()
   for _, buf in ipairs(vim.api.nvim_list_bufs()) do
-    if vim.api.nvim_buf_get_name(buf):find('^revision://') then
+    local name = vim.api.nvim_buf_get_name(buf)
+    if name:find('^revision://') and name ~= 'revision://files' then
       vim.api.nvim_buf_delete(buf, { force = true })
     end
   end
   M.s = nil
+  require('revision.panel').refresh()
 end
 
 function M.toggle_comments()
@@ -273,7 +266,7 @@ function M.body()
   local w = math.floor(vim.o.columns * 0.8)
   local h = math.floor(vim.o.lines * 0.8)
   local verdict = util.nn(s.review.verdict) or 'no verdict'
-  vim.api.nvim_open_win(s.review_buf, true, {
+  local win = vim.api.nvim_open_win(s.review_buf, true, {
     relative = 'editor',
     width = w,
     height = h,
@@ -283,6 +276,8 @@ function M.body()
     title = ' Review: ' .. verdict .. ' ',
     title_pos = 'left',
   })
+  vim.wo[win].wrap = true
+  vim.wo[win].linebreak = true
 end
 
 function M.verdict()

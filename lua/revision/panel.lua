@@ -1,4 +1,5 @@
 local util = require('revision.util')
+local git = require('revision.git')
 local view = require('revision.view')
 local inline = require('revision.inline')
 
@@ -6,9 +7,25 @@ local M = {}
 
 local NAME = 'revision://files'
 local ns = vim.api.nvim_create_namespace('revision_panel')
+local ns_current = vim.api.nvim_create_namespace('revision_panel_current')
 
---- Per-render row map: { [row] = { kind = 'header'|'file', category, e } }.
+--- Per-render row map: { [row] = { kind = 'dir'|'file', path, e?, name_col, name_end } }.
 M.rows = {}
+--- Show every file of the repo, not only the changed ones. Always on outside a review.
+M.all = false
+
+local levels = {}
+--- Directory fold state by path: true closed, false open, nil for the default.
+local closed = {}
+--- Window M.rows and the folds were last rendered into, and the root they are relative to.
+local rendered_win, rendered_root
+--- Row of each file path in the last render.
+local file_rows = {}
+--- { root, paths } of every file, rescanned on demand.
+local listing
+
+--- Walk cap for directories outside git, where nothing is ignored.
+local WALK_LIMIT = 20000
 
 local function session()
   return require('revision.session').s
@@ -22,171 +39,489 @@ function M.win()
   end
 end
 
---- Path shown in the window the user came from, for the current-file highlight.
-local function current_path(panel)
-  local cur = vim.api.nvim_get_current_win()
-  if cur ~= panel and inline.state[vim.api.nvim_win_get_buf(cur)] then
-    return inline.state[vim.api.nvim_win_get_buf(cur)].path
-  end
-  for _, w in ipairs(vim.api.nvim_list_wins()) do
-    local st = w ~= panel and inline.state[vim.api.nvim_win_get_buf(w)]
-    if st then
-      return st.path
+local function scan()
+  local s = session()
+  local cwd = vim.fn.getcwd()
+  local root = s and s.root or git.out(cwd, { 'rev-parse', '--show-toplevel' }, { allow_fail = true })
+  local paths = {}
+  if root and root ~= '' then
+    local out = git.run(root, { 'ls-files', '-z', '--cached', '--others', '--exclude-standard' }, { allow_fail = true })
+    local seen = {}
+    for _, p in ipairs(vim.split(out or '', '\0', { plain = true })) do
+      if p ~= '' and not seen[p] then
+        seen[p] = true
+        table.insert(paths, p)
+      end
     end
+  else
+    root = cwd
+    for name, kind in vim.fs.dir(root, { depth = math.huge }) do
+      if kind ~= 'directory' then
+        if #paths == WALK_LIMIT then
+          util.warn(('%s has over %d files; the panel lists the first %d'):format(root, WALK_LIMIT, WALK_LIMIT))
+          break
+        end
+        table.insert(paths, name)
+      end
+    end
+  end
+  listing = { root = root, paths = paths }
+end
+
+--- Path shown in the window the user came from, for the current-file highlight.
+local function current_path(panel, root)
+  local function rel(w)
+    local buf = vim.api.nvim_win_get_buf(w)
+    if inline.state[buf] then
+      return inline.state[buf].path
+    end
+    local name = vim.api.nvim_buf_get_name(buf)
+    if vim.bo[buf].buftype == '' and name:sub(1, #root + 1) == root .. '/' then
+      return name:sub(#root + 2)
+    end
+  end
+  local cur = vim.api.nvim_get_current_win()
+  if cur ~= panel then
+    return rel(cur)
+  end
+  local prev = vim.fn.win_getid(vim.fn.winnr('#'))
+  if prev ~= 0 and prev ~= panel then
+    return rel(prev)
   end
 end
 
-local function file_text(s, e, indent)
+local function stats(n)
+  return ('  +%d -%d'):format(n.additions, n.deletions)
+end
+
+local function file_text(s, e, prefix)
   local f = require('revision.files').fields(s, e)
-  local parts = { indent .. f.viewed .. ' ' .. f.path, f.adds .. ' ' .. f.dels }
+  local parts = { prefix .. f.viewed .. ' ', f.adds .. ' ' .. f.dels }
   if f.comments > 0 then
     table.insert(parts, 'c:' .. f.comments)
   end
   if f.findings > 0 then
     table.insert(parts, 'f:' .. f.findings)
   end
-  return table.concat(parts, '  ')
+  return parts[1], table.concat(parts, '  ', 2)
 end
 
-local function header_text(s, category, files, collapsed)
-  local a, d = 0, 0
-  for _, e in ipairs(files) do
-    a, d = a + e.additions, d + e.deletions
-  end
-  return ('%s %s (%d)  +%d -%d'):format(collapsed and '▸' or '▾', category, #files, a, d)
-end
-
---- Visible files grouped by category, in display order.
-local function grouped(s, files)
-  local by_cat, order = {}, {}
-  for _, e in ipairs(files) do
-    local c = view.category(s, e.path)
-    if not by_cat[c] then
-      by_cat[c] = {}
-      table.insert(order, c)
+--- Rows of the tree under node, depth-first. Returns the directory rows in order.
+local function render(s, tree, lines, rows)
+  local dirs = {}
+  local function walk(node, depth)
+    local indent = string.rep('  ', depth)
+    for _, c in ipairs(node.children) do
+      local meta
+      if c.dir then
+        local prefix = indent .. '▾ '
+        local name = c.name .. '/'
+        table.insert(lines, prefix .. name .. (c.changed > 0 and stats(c) or ''))
+        meta = { kind = 'dir', path = c.path, changed = c.changed, row = #lines, depth = depth }
+        meta.name_col, meta.name_end = #prefix, #prefix + #name
+        levels[#lines] = '>' .. (depth + 1)
+        table.insert(dirs, meta)
+      else
+        local prefix, rest = indent .. '  ', ''
+        if c.e then
+          prefix, rest = file_text(s, c.e, indent)
+          rest = '  ' .. rest
+        end
+        table.insert(lines, prefix .. c.name .. rest)
+        meta = { kind = 'file', path = c.path, e = c.e }
+        meta.name_col, meta.name_end = #prefix, #prefix + #c.name
+        levels[#lines] = depth
+      end
+      rows[#lines] = meta
+      if c.dir then
+        walk(c, depth + 1)
+      end
     end
-    table.insert(by_cat[c], e)
   end
-  local rank = {}
-  for i, c in ipairs(view.ORDER) do
-    rank[c] = i
-  end
-  table.sort(order, function(x, y)
-    return (rank[x] or #view.ORDER + 1) < (rank[y] or #view.ORDER + 1)
+  walk(tree, 0)
+  return dirs
+end
+
+--- Records the directories the user folded or unfolded since the last render.
+local function capture(win)
+  vim.api.nvim_win_call(win, function()
+    for row, meta in pairs(M.rows) do
+      if meta.kind == 'dir' then
+        local fc = vim.fn.foldclosed(row)
+        if fc == row and not meta.folded then
+          closed[meta.path] = true
+        elseif fc == -1 and meta.folded then
+          closed[meta.path] = false
+        end
+      end
+    end
   end)
-  return order, by_cat
+end
+
+--- Opens every fold, then closes the folded directories innermost first: a fold
+--- inside an already closed one cannot be closed. Unchanged directories start
+--- folded unless a path filter is active, so its matches stay visible.
+local function apply_folds(win, dirs, all)
+  local filtering = (view.query or '') ~= ''
+  vim.api.nvim_win_call(win, function()
+    vim.cmd('silent! %foldopen!')
+    for i = #dirs, 1, -1 do
+      local d = dirs[i]
+      local want = closed[d.path]
+      if want == nil then
+        want = all and d.changed == 0 and not filtering
+      end
+      d.folded = want
+      if want then
+        vim.cmd(d.row .. 'foldclose')
+      end
+    end
+  end)
+end
+
+local function key_of(meta)
+  return meta and (meta.kind .. ':' .. meta.path)
+end
+
+--- The agent's reading-order reason under the file row, word-wrapped to the panel: the panel is
+--- too narrow to fit it after the name.
+local function reason_lines(win, line, meta, reason)
+  local indent = vim.fn.strdisplaywidth(line:sub(1, meta.name_col)) + 2
+  local width = math.max(12, vim.api.nvim_win_get_width(win) - indent - 1)
+  local out, cur = {}, ''
+  for word in reason:gmatch('%S+') do
+    if cur ~= '' and vim.fn.strdisplaywidth(cur .. ' ' .. word) > width then
+      table.insert(out, cur)
+      cur = word
+    else
+      cur = cur == '' and word or (cur .. ' ' .. word)
+    end
+  end
+  table.insert(out, cur)
+  return vim.tbl_map(function(l)
+    return { { string.rep(' ', indent) .. l, 'RevisionViewed' } }
+  end, out)
 end
 
 function M.refresh()
   local win = M.win()
-  local s = session()
-  if not win or not s or not s.range then
+  -- BufEnter fires while toggle is still setting up the window.
+  if not win or vim.wo[win].foldmethod ~= 'expr' then
     return
   end
+  local s = session()
+  if s and not s.range then
+    return
+  end
+  local all = M.all or not s
+  if all and (not listing or (s and listing.root ~= s.root)) then
+    scan()
+  end
+  local root = s and s.root or listing.root
   local buf = vim.api.nvim_win_get_buf(win)
-  local cur = current_path(win)
-  local files = view.visible(s)
-  local sort = s.review.view.sort
-  local lines, rows = { ('%s · %s'):format(require('revision.range').describe(s.range), view.describe(s)) }, {}
 
-  local function add_file(e, indent)
-    table.insert(lines, file_text(s, e, indent))
-    rows[#lines] = { kind = 'file', e = e }
+  local same = rendered_win == win
+  local cursor_key
+  if same then
+    capture(win)
+    cursor_key = key_of(M.rows[vim.api.nvim_win_get_cursor(win)[1]])
   end
 
-  if #files == 0 then
-    table.insert(lines, 'no files match the view')
-  elseif sort == 'category' then
-    local order, by_cat = grouped(s, files)
-    for _, c in ipairs(order) do
-      local collapsed = s.panel_collapsed[c] or false
-      table.insert(lines, header_text(s, c, by_cat[c], collapsed))
-      rows[#lines] = { kind = 'header', category = c }
-      if not collapsed then
-        for _, e in ipairs(by_cat[c]) do
-          add_file(e, '  ')
-        end
+  local list = {}
+  local in_range = {}
+  if s then
+    for _, e in ipairs(s.files) do
+      in_range[e.path] = true
+    end
+    for _, e in ipairs(view.filtered(s)) do
+      table.insert(list, { path = e.path, e = e })
+    end
+  end
+  if all then
+    for _, p in ipairs(listing.paths) do
+      if not in_range[p] and view.match_query(p) then
+        table.insert(list, { path = p })
       end
     end
+  end
+
+  local header = s and require('revision.range').describe(s.range) or vim.fn.fnamemodify(root, ':~')
+  if s and all then
+    header = header .. '  (all files)'
+  end
+  local lines, rows = { header }, {}
+  levels = { 0 }
+  local dirs = {}
+  if #list == 0 then
+    table.insert(lines, 'no files match the view')
   else
-    for _, e in ipairs(files) do
-      add_file(e, '')
-    end
+    dirs = render(s, view.tree(s, list), lines, rows)
   end
 
   vim.bo[buf].modifiable = true
   vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
   vim.bo[buf].modifiable = false
-  vim.api.nvim_buf_clear_namespace(buf, ns, 0, -1)
-  local viewed = require('revision.viewed')
+  M.rows = rows
+  rendered_win, rendered_root = win, root
+  file_rows = {}
   for row, meta in pairs(rows) do
     if meta.kind == 'file' then
-      if viewed.file_viewed(s, meta.e.path) then
-        vim.api.nvim_buf_set_extmark(buf, ns, row - 1, 0, { line_hl_group = 'RevisionViewed' })
-      end
-      if meta.e.path == cur then
-        vim.api.nvim_buf_set_extmark(buf, ns, row - 1, 0, { line_hl_group = 'RevisionCurrent' })
-      end
-      local reason = sort == 'order' and view.reason(s, meta.e.path)
-      if reason then
-        vim.api.nvim_buf_set_extmark(buf, ns, row - 1, 0, {
-          virt_text = { { '  ' .. reason, 'RevisionViewed' } },
-        })
+      file_rows[meta.path] = row
+    end
+  end
+  apply_folds(win, dirs, all)
+
+  local sort, filter = view.indicators(s)
+  vim.wo[win].winbar = (' %s  %s'):format(sort, filter):gsub('%%', '%%%%')
+
+  vim.api.nvim_buf_clear_namespace(buf, ns, 0, -1)
+  local viewed = require('revision.viewed')
+  local reasons = s and view.state(s).sort == 'order'
+  for row, meta in pairs(rows) do
+    local hl = meta.kind == 'dir' and 'Directory' or (not meta.e and 'RevisionUnchanged') or nil
+    if hl then
+      vim.api.nvim_buf_set_extmark(buf, ns, row - 1, meta.name_col, { end_col = meta.name_end, hl_group = hl })
+    end
+    if meta.e and viewed.file_viewed(s, meta.path) then
+      vim.api.nvim_buf_set_extmark(buf, ns, row - 1, 0, { line_hl_group = 'RevisionViewed' })
+    end
+    local reason = reasons and meta.e and view.reason(s, meta.path)
+    if reason and reason ~= '' then
+      vim.api.nvim_buf_set_extmark(buf, ns, row - 1, 0, { virt_lines = reason_lines(win, lines[row], meta, reason) })
+    end
+  end
+  M.mark_current()
+
+  if cursor_key then
+    for row, meta in pairs(rows) do
+      if key_of(meta) == cursor_key then
+        vim.api.nvim_win_set_cursor(win, { row, 0 })
+        break
       end
     end
   end
-  M.rows = rows
+end
+
+--- Moves the current-file highlight; cheap enough for every BufEnter.
+function M.mark_current()
+  local win = M.win()
+  if not win or win ~= rendered_win then
+    return
+  end
+  local buf = vim.api.nvim_win_get_buf(win)
+  vim.api.nvim_buf_clear_namespace(buf, ns_current, 0, -1)
+  local row = file_rows[current_path(win, rendered_root)]
+  if row then
+    vim.api.nvim_buf_set_extmark(buf, ns_current, row - 1, 0, { line_hl_group = 'RevisionCurrent' })
+  end
+end
+
+function M.foldexpr()
+  return levels[vim.v.lnum] or 0
+end
+
+--- The directory row with a closed arrow; the fill after it is blank.
+function M.foldtext()
+  local row = vim.v.foldstart
+  local line = vim.fn.getline(row)
+  local meta = M.rows[row]
+  if not meta then
+    return line
+  end
+  local prefix = line:sub(1, meta.name_col):gsub('▾', '▸', 1)
+  return {
+    { prefix },
+    { line:sub(meta.name_col + 1, meta.name_end), 'Directory' },
+    { line:sub(meta.name_end + 1) },
+  }
 end
 
 local function at_cursor()
   return M.rows[vim.api.nvim_win_get_cursor(0)[1]]
 end
 
-local function toggle_group(category)
+--- A normal window to open files in: the previous one, else any, else a new split.
+local function target_win(panel)
+  local prev = vim.fn.win_getid(vim.fn.winnr('#'))
+  if prev ~= 0 and prev ~= panel and vim.api.nvim_win_get_config(prev).relative == '' then
+    return prev
+  end
+  for _, w in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+    if w ~= panel and vim.api.nvim_win_get_config(w).relative == '' then
+      return w
+    end
+  end
+  vim.cmd('rightbelow vsplit')
+  local w = vim.api.nvim_get_current_win()
+  vim.api.nvim_win_set_width(panel, require('revision.config').opts.panel_width)
+  return w
+end
+
+local function open()
+  local meta = at_cursor()
+  if not meta then
+    return
+  end
+  if meta.kind == 'dir' then
+    vim.cmd('normal! za')
+    return
+  end
+  local root = session() and session().root or listing.root
+  vim.api.nvim_set_current_win(target_win(vim.api.nvim_get_current_win()))
+  if meta.e then
+    require('revision.files').open(meta.e)
+  else
+    vim.cmd.edit(vim.fn.fnameescape(root .. '/' .. meta.path))
+  end
+end
+
+local function toggle_viewed()
+  local meta = at_cursor()
   local s = session()
-  s.panel_collapsed[category] = not s.panel_collapsed[category]
+  if meta and meta.e then
+    local viewed = require('revision.viewed')
+    viewed.set_file(s, meta.path, not viewed.file_viewed(s, meta.path))
+  end
+end
+
+local function toggle_all()
+  if not session() then
+    util.notify('no review session; every file is shown')
+    return
+  end
+  M.all = not M.all
+  if M.all then
+    listing = nil
+  end
   M.refresh()
 end
 
-local function keys(buf)
-  local map = function(lhs, fn)
-    vim.keymap.set('n', lhs, util.guard(fn), { buffer = buf, nowait = true, desc = 'revision: panel' })
+local function rescan()
+  listing = nil
+  require('revision.range').reload()
+  M.refresh()
+end
+
+local function sort(key, reverse)
+  return function()
+    view.set_sort(key, reverse)
   end
-  map('<CR>', function()
-    local meta = at_cursor()
-    if not meta then
-      return
+end
+
+local KEYMAPS = {
+  { '<CR>', 'open file / toggle directory', open },
+  { 'v', 'toggle file viewed', toggle_viewed },
+  { '.', 'toggle unchanged files', toggle_all },
+  {
+    'f',
+    'filter by path, live',
+    function()
+      view.filter_text()
+    end,
+  },
+  {
+    'F',
+    'filter menu',
+    function()
+      view.filter_menu()
+    end,
+  },
+  { ',p', 'sort by path', sort('path', false) },
+  { ',P', 'sort by path, reversed', sort('path', true) },
+  { ',s', 'sort by size', sort('size', false) },
+  { ',S', 'sort by size, reversed', sort('size', true) },
+  { ',a', 'sort by activity', sort('activity', false) },
+  { ',A', 'sort by activity, reversed', sort('activity', true) },
+  { ',o', 'sort by agent order', sort('order', false) },
+  { ',O', 'sort by agent order, reversed', sort('order', true) },
+  { 'R', 'rescan files', rescan },
+  {
+    '?',
+    'help',
+    function()
+      M.help()
+    end,
+  },
+  {
+    'q',
+    'close',
+    function()
+      M.close()
+    end,
+  },
+}
+
+local FOLD_HELP = {
+  { 'za zo zc', 'toggle / open / close directory' },
+  { 'zA zO zC', 'same, recursively' },
+  { 'zR zM', 'open / close every directory' },
+  { 'zj zk', 'next / previous directory' },
+}
+
+function M.help()
+  local lines = {}
+  local width = 0
+  local function add(lhs, desc)
+    local line = ('  %-9s %s'):format(lhs, desc)
+    width = math.max(width, vim.fn.strdisplaywidth(line) + 2)
+    table.insert(lines, line)
+  end
+  for _, k in ipairs(KEYMAPS) do
+    add(k[1], k[2])
+  end
+  table.insert(lines, '')
+  for _, k in ipairs(FOLD_HELP) do
+    add(k[1], k[2])
+  end
+  local buf = vim.api.nvim_create_buf(false, true)
+  vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+  vim.bo[buf].modifiable = false
+  vim.bo[buf].bufhidden = 'wipe'
+  local win = vim.api.nvim_open_win(buf, true, {
+    relative = 'editor',
+    width = width,
+    height = #lines,
+    row = math.floor((vim.o.lines - #lines) / 2),
+    col = math.floor((vim.o.columns - width) / 2),
+    border = 'rounded',
+    title = ' revision panel ',
+    title_pos = 'center',
+    style = 'minimal',
+  })
+  local close = function()
+    if vim.api.nvim_win_is_valid(win) then
+      vim.api.nvim_win_close(win, true)
     end
-    if meta.kind == 'header' then
-      toggle_group(meta.category)
-    else
-      vim.cmd('wincmd p')
-      require('revision.files').open(meta.e)
-    end
-  end)
-  map('v', function()
-    local meta = at_cursor()
-    if meta and meta.kind == 'file' then
-      local s = session()
-      local viewed = require('revision.viewed')
-      viewed.set_file(s, meta.e.path, not viewed.file_viewed(s, meta.e.path))
-    end
-  end)
-  map('za', function()
-    local meta = at_cursor()
-    if meta and meta.category then
-      toggle_group(meta.category)
-    end
-  end)
-  map('s', function()
-    view.menu()
-  end)
-  map('f', function()
-    view.menu()
-  end)
-  map('q', function()
-    M.close()
-  end)
+  end
+  for _, lhs in ipairs({ 'q', '<Esc>', '?' }) do
+    vim.keymap.set('n', lhs, close, { buffer = buf, nowait = true })
+  end
+  vim.api.nvim_create_autocmd('WinLeave', { buffer = buf, once = true, callback = close })
+end
+
+local function keys(buf)
+  for _, k in ipairs(KEYMAPS) do
+    vim.keymap.set('n', k[1], util.guard(k[3]), { buffer = buf, nowait = true, desc = 'revision: ' .. k[2] })
+  end
+end
+
+local function autocmds()
+  local group = vim.api.nvim_create_augroup('revision_panel', {})
+  vim.api.nvim_create_autocmd('BufEnter', {
+    group = group,
+    callback = function()
+      M.mark_current()
+    end,
+  })
+  vim.api.nvim_create_autocmd({ 'BufWritePost', 'DirChanged' }, {
+    group = group,
+    callback = function()
+      if M.win() then
+        listing = nil
+        M.refresh()
+      end
+    end,
+  })
 end
 
 local function ensure_buf()
@@ -202,6 +537,7 @@ local function ensure_buf()
   vim.bo[buf].filetype = 'revision-files'
   vim.bo[buf].modifiable = false
   keys(buf)
+  autocmds()
   return buf
 end
 
@@ -212,14 +548,20 @@ function M.close()
   end
 end
 
+--- Opens and focuses the panel; focuses it when open elsewhere; closes it when focused.
 function M.toggle()
-  if M.win() then
-    M.close()
+  local win = M.win()
+  if win then
+    if win == vim.api.nvim_get_current_win() then
+      M.close()
+    else
+      vim.api.nvim_set_current_win(win)
+    end
     return
   end
-  local cur = vim.api.nvim_get_current_win()
+  require('revision').define_highlights()
   vim.cmd('topleft vsplit')
-  local win = vim.api.nvim_get_current_win()
+  win = vim.api.nvim_get_current_win()
   vim.api.nvim_win_set_buf(win, ensure_buf())
   vim.api.nvim_win_set_width(win, require('revision.config').opts.panel_width)
   local wo = vim.wo[win][0]
@@ -228,10 +570,20 @@ function M.toggle()
   wo.relativenumber = false
   wo.signcolumn = 'no'
   wo.wrap = false
-  if vim.api.nvim_win_is_valid(cur) then
-    vim.api.nvim_set_current_win(cur)
-  end
+  wo.foldmethod = 'expr'
+  wo.foldexpr = "v:lua.require'revision.panel'.foldexpr()"
+  wo.foldtext = "v:lua.require'revision.panel'.foldtext()"
+  wo.foldlevel = 99
+  wo.foldcolumn = '0'
+  wo.foldenable = true
+  wo.fillchars = 'fold: '
+  wo.winhighlight = 'Folded:Normal'
+  rendered_win = nil
+  listing = nil
   M.refresh()
+  if vim.api.nvim_buf_line_count(0) > 1 then
+    vim.api.nvim_win_set_cursor(win, { 2, 0 })
+  end
 end
 
 return M

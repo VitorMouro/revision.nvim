@@ -32,7 +32,7 @@ require('revision').setup({
   base = nil,          -- base ref; nil uses <remote>/HEAD, context.json overrides it
   context_lines = 3,
   keymaps = true,      -- false to bind your own
-  categories = {},     -- labels for grouping files in the panel
+  categories = {},     -- {glob, category} rules for the category filter
   panel_width = 40,
   agent = { tool = nil }, -- sidekick tool name
 })
@@ -63,6 +63,22 @@ There are three kinds of annotation, cycled with `<leader>rp`:
 
 Findings that an agent writes into context.json show inline by severity and
 can be accepted into a comment or dismissed.
+
+### File panel
+
+`:Revision panel` (`<leader>rf`) opens a file tree and focuses it. It works
+without a review session too, as a plain explorer of the repo (or of the
+current directory outside git). In a session it shows the changed files; `.`
+adds the rest of the repo, with unchanged directories folded. Directories fold
+with the usual `z` commands.
+
+The winbar shows the sort and the filter. Sort keys follow yazi: `,p` path,
+`,s` size, `,a` activity (comments and findings), `,o` agent order, and the
+uppercase key reverses. Directories come first and sort by the sum of their
+files. `f` filters by path as you type (smart-case, `<Esc>` restores the
+previous filter, not saved), `F` opens the filter menu (unviewed, annotated,
+categories). `]f` / `[f` and the picker follow the same order and filters, over
+changed files only. `?` lists the panel keys.
 
 ### Keymaps
 

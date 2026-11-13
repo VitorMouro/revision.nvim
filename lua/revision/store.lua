@@ -83,7 +83,7 @@ local function fresh()
     next_id = 1,
     dismissed_findings = {},
     reviewed_commits = {},
-    view = { sort = 'category', unviewed = false, annotated = false, categories = vim.NIL },
+    view = { sort = 'path', reverse = false, unviewed = false, annotated = false, categories = vim.NIL },
   }
 end
 
@@ -107,6 +107,10 @@ function M.load(path)
       t[k] = v
     end
   end
+  if not vim.tbl_contains(require('revision.view').SORTS, t.view.sort) then
+    t.view.sort = 'path'
+  end
+  t.view.reverse = t.view.reverse == true
   return t
 end
 

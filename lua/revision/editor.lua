@@ -44,6 +44,9 @@ function M.open(d)
     footer = (' %srp kind '):format(leader()),
     footer_pos = 'right',
   })
+  -- An accepted finding arrives as long paragraphs; without wrap they run off the float.
+  vim.wo[win].wrap = true
+  vim.wo[win].linebreak = true
 
   -- Normal mode only: an insert-mode leader chord would swallow typed spaces, and <C-p> is completion.
   vim.keymap.set('n', '<leader>rp', function()

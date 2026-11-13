@@ -17,6 +17,7 @@ local highlights = {
   RevisionFindingInfo = 'DiagnosticHint',
   RevisionCurrent = 'Visual',
   RevisionViewed = 'Comment',
+  RevisionUnchanged = 'Comment',
 }
 
 function M.define_highlights()

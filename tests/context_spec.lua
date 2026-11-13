@@ -146,7 +146,10 @@ it('findings render, accept into a comment, and dismiss', function()
   assert(text:find('major · magic number', 1, true), text)
 
   vim.api.nvim_win_set_cursor(0, { 3, 0 })
+  vim.o.wrap = false
   comments.accept_finding()
+  assert(vim.wo.wrap and vim.wo.linebreak, 'the comment editor must wrap long finding text under a global nowrap')
+  vim.o.wrap = true
   write_editor('magic number')
   local c = fx.s.review.comments[1]
   assert(c and c.finding == 'F1', vim.inspect(c))

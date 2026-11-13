@@ -192,3 +192,12 @@ it('quickfix marks outdated comments and ones the range cannot show', function()
   assert(items[2].text:find('hidden', 1, true), items[2].text)
   vim.cmd('cclose')
 end)
+
+it('the review body float wraps long paragraphs under a global nowrap', function()
+  h.start()
+  vim.o.wrap = false
+  require('revision.session').body()
+  assert(vim.wo.wrap and vim.wo.linebreak, 'the body float must wrap')
+  vim.cmd.close()
+  vim.o.wrap = true
+end)
