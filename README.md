@@ -10,6 +10,9 @@ mark files and hunks as viewed.
 
 - Neovim 0.12 (tested on 0.12.6)
 - git
+- [ripgrep](https://github.com/BurntSushi/ripgrep) for `<leader>rs`
+- Optional: [telescope.nvim](https://github.com/nvim-telescope/telescope.nvim)
+  for the pickers; without it they fall back to `vim.ui.select`.
 - Optional: [sidekick.nvim](https://github.com/folke/sidekick.nvim) for
   asking an agent about a line. Without it, the prompt is copied to the `+`
   register.
@@ -84,7 +87,9 @@ changed files only. `?` lists the panel keys.
 ### Keymaps
 
 Global, under `<leader>r`: `f` panel, `o` files, `v` view, `r` range, `k`
-commits.
+commits, `s` search changed lines with ripgrep (regex, live), `z` fuzzy search
+changed lines. Both cover added and deleted lines; picking a deleted line jumps
+to where it was removed.
 
 In a diffed buffer:
 

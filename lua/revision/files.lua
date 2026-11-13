@@ -92,7 +92,7 @@ function M.open(e)
 end
 
 --- Unified diff of one file in the current range, for the picker preview.
-local function preview(s, e)
+function M.preview(s, e)
   if e.binary then
     return { 'binary file' }
   end
@@ -147,7 +147,7 @@ local function telescope(s, rows)
       title = 'Diff',
       define_preview = function(self, entry)
         local buf = self.state.bufnr
-        vim.api.nvim_buf_set_lines(buf, 0, -1, false, preview(s, entry.value.e))
+        vim.api.nvim_buf_set_lines(buf, 0, -1, false, M.preview(s, entry.value.e))
         vim.bo[buf].filetype = 'diff'
       end,
     }),

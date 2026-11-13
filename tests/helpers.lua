@@ -42,12 +42,14 @@ local function numbered(n, fmt)
   return t
 end
 
---- Only git on PATH; data and state dirs under a temp dir.
+--- Only git and rg on PATH; data and state dirs under a temp dir.
 function M.isolate()
   local tmp = vim.fn.tempname()
   local bin = tmp .. '/bin'
   vim.fn.mkdir(bin, 'p')
-  vim.uv.fs_symlink(vim.fn.exepath('git'), bin .. '/git')
+  for _, exe in ipairs({ 'git', 'rg' }) do
+    vim.uv.fs_symlink(vim.fn.exepath(exe), bin .. '/' .. exe)
+  end
   vim.env.PATH = bin
   vim.env.XDG_DATA_HOME = tmp .. '/data'
   vim.env.XDG_STATE_HOME = tmp .. '/state'
